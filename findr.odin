@@ -8,7 +8,7 @@ main :: proc() {
 	args := os.args
 
 	opts: WalkOptions
-	opts.include_hidden = true
+	opts.include_hidden = false
 	opts.ignore_mode = .Respected
 
 	excludes := make([dynamic]string)
@@ -22,12 +22,8 @@ main :: proc() {
 	for i < len(args) {
 		arg := args[i]
 		switch {
-		case arg == "-I":
-			opts.ignore_mode = .All
 		case arg == "--ignored":
 			opts.ignore_mode = .Ignored
-		case arg == "--no-hidden":
-			opts.include_hidden = false
 		case arg == "-E":
 			i += 1
 			if i < len(args) {
@@ -35,8 +31,17 @@ main :: proc() {
 			}
 		case strings.has_prefix(arg, "-E"):
 			append(&excludes, arg[2:])
-		case len(arg) > 0 && arg[0] == '-':
-			// unknown flag, skip
+		case len(arg) > 1 && arg[0] == '-':
+			for c, j in arg[1:] {
+				switch c {
+				case 'H':
+					opts.include_hidden = true
+				case 'I':
+					opts.ignore_mode = .All
+				case 'a':
+					// no-op: accepted for fd compatibility
+				}
+			}
 		case:
 			if pattern == "" {
 				pattern = arg

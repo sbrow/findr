@@ -63,7 +63,9 @@ test_dir_only_pattern :: proc(t: ^testing.T) {
 	create_dir(env, "repo/ignored_dir")
 	create_file(env, "repo/.gitignore", "ignored_dir/\n")
 
-	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .Ignored}, {})
+	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .Ignored}, {
+		"repo/ignored_dir/",
+	})
 }
 
 @(test)
@@ -158,7 +160,7 @@ test_nested_gitignore_respected_mode :: proc(t: ^testing.T) {
 	// important.log: un-ignored by nested negation → emitted
 	// debug.log: ignored by root → skipped
 	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .Respected}, {
-		"repo/.gitignore", "repo/sub/.gitignore", "repo/sub/important.log",
+		"repo/", "repo/.gitignore", "repo/sub/", "repo/sub/.gitignore", "repo/sub/important.log",
 	})
 }
 
@@ -253,7 +255,7 @@ test_all_mode_emits_all_files :: proc(t: ^testing.T) {
 	create_file(env, "repo/normal.txt")
 
 	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .All}, {
-		"repo/.env", "repo/.gitignore", "repo/secrets.env", "repo/normal.txt",
+		"repo/", "repo/.env", "repo/.gitignore", "repo/secrets.env", "repo/normal.txt",
 	})
 }
 
@@ -268,7 +270,7 @@ test_all_mode_descends_everywhere :: proc(t: ^testing.T) {
 	create_file(env, "repo/build/output.txt")
 
 	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .All}, {
-		"repo/.gitignore", "repo/build/output.txt",
+		"repo/", "repo/.gitignore", "repo/build/", "repo/build/output.txt",
 	})
 }
 
@@ -288,7 +290,7 @@ test_respected_mode_skips_gitignored :: proc(t: ^testing.T) {
 	create_file(env, "repo/normal.txt")
 
 	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .Respected}, {
-		"repo/.gitignore", "repo/normal.txt",
+		"repo/", "repo/.gitignore", "repo/normal.txt",
 	})
 }
 
@@ -304,7 +306,7 @@ test_respected_mode_prunes_ignored_dirs :: proc(t: ^testing.T) {
 	create_file(env, "repo/main.txt")
 
 	assert_output(t, env, nil, {include_hidden = true, ignore_mode = .Respected}, {
-		"repo/.gitignore", "repo/main.txt",
+		"repo/", "repo/.gitignore", "repo/main.txt",
 	})
 }
 

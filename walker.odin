@@ -230,6 +230,12 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		}
 
 		if is_dir {
+			if should_emit && matches_pattern(pool, entry.name) {
+				dir_path_out := join_path_dir(dir_path, entry.name)
+				sync.mutex_lock(&pool.results_mutex)
+				append(pool.results, dir_path_out)
+				sync.mutex_unlock(&pool.results_mutex)
+			}
 			if !ignored {
 				child_rel, _ := strings.clone(entry_rel)
 				child_path := join_path(dir_path, entry.name)
@@ -362,6 +368,22 @@ join_path :: proc(parent, child: string) -> string {
 		fmt.sbprintf(&b, "/")
 	}
 	fmt.sbprintf(&b, "%s", child)
+
+	s := strings.to_string(b)
+	result, _ := strings.clone(s)
+	return result
+}
+
+join_path_dir :: proc(parent, child: string) -> string {
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+
+	fmt.sbprintf(&b, "%s", parent)
+	if len(parent) == 0 || parent[len(parent) - 1] != '/' {
+		fmt.sbprintf(&b, "/")
+	}
+	fmt.sbprintf(&b, "%s/", child)
 
 	s := strings.to_string(b)
 	result, _ := strings.clone(s)

@@ -38,16 +38,17 @@ echo
 
 # --- file counts ---
 echo "=== File counts ==="
-printf "  findr --ignored             : %8d\n" "$("$FINDR" --ignored "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a .                      : %8d\n" "$(fd -a . "$TARGET" 2>/dev/null | wc -l)"
+printf "  findr                        : %8d\n" "$("$FINDR" "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd . -t f --exclude .git    : %8d\n" "$(fd . -t f --exclude .git "$TARGET" 2>/dev/null | wc -l)"
-printf "  findr --no-hidden           : %8d\n" "$("$FINDR" --no-hidden "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -H .                   : %8d\n" "$(fd -a -H . "$TARGET" 2>/dev/null | wc -l)"
+printf "  findr -H                     : %8d\n" "$("$FINDR" -H "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd . -H -t f --exclude .git : %8d\n" "$(fd . -H -t f --exclude .git "$TARGET" 2>/dev/null | wc -l)"
-printf "  findr (respect)             : %8d\n" "$("$FINDR" "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -HI .                  : %8d\n" "$(fd -a -HI . "$TARGET" 2>/dev/null | wc -l)"
+printf "  findr -HI                    : %8d\n" "$("$FINDR" -HI "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd . -HI -t f --exclude .git: %8d\n" "$(fd . -HI -t f --exclude .git "$TARGET" 2>/dev/null | wc -l)"
-printf "  findr -I (all)              : %8d\n" "$("$FINDR" -I "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .git .              : %8d\n" "$(fd -a -E .git . "$TARGET" 2>/dev/null | wc -l)"
+printf "  findr -E .git                : %8d\n" "$("$FINDR" -E .git "$TARGET" 2>/dev/null | wc -l)"
 echo
 
 # --- benchmarks ---
@@ -57,13 +58,14 @@ hyperfine \
     --warmup 2 \
     --runs 5 \
     --export-markdown "$RESULTS_FILE" \
-    "$FINDR --ignored \"$TARGET\" > /dev/null" \
-    "fd . -t f --exclude .git \"$TARGET\" > /dev/null" \
-    "$FINDR --no-hidden \"$TARGET\" > /dev/null" \
-    "fd . -H -t f --exclude .git \"$TARGET\" > /dev/null" \
+    "fd -a . \"$TARGET\" > /dev/null" \
     "$FINDR \"$TARGET\" > /dev/null" \
-    "fd . -HI -t f --exclude .git \"$TARGET\" > /dev/null" \
-    "$FINDR -I \"$TARGET\" > /dev/null"
+    "fd -a -H . \"$TARGET\" > /dev/null" \
+    "$FINDR -H \"$TARGET\" > /dev/null" \
+    "fd -a -HI . \"$TARGET\" > /dev/null" \
+    "$FINDR -HI \"$TARGET\" > /dev/null" \
+    "fd -a -E .git . \"$TARGET\" > /dev/null" \
+    "$FINDR -E .git \"$TARGET\" > /dev/null"
 echo
 
 echo "=== Results written to $RESULTS_FILE ==="
