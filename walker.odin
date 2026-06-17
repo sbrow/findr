@@ -21,11 +21,6 @@ WalkOptions :: struct {
 	ignore_mode:    IgnoreMode,
 }
 
-RawEntry :: struct {
-	name: string,
-	type: linux.Dirent_Type,
-}
-
 GIContext :: struct {
 	gi:       ^Gitignore, // nil if this dir had no .gitignore
 	base_rel: string, // relative path from repo root to this dir
@@ -188,9 +183,16 @@ walk_worker :: proc(t: ^thread.Thread) {
 
 process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]string) {
 	dir_path := item.path
-	has_git := false
-	entries := read_dir_entries(dir_path, &has_git)
-	defer free_entries(&entries)
+
+	cpath := strings.clone_to_cstring(dir_path)
+	if cpath == nil do return
+	defer delete(cpath)
+
+	fd, open_err := linux.open(cpath, {.DIRECTORY, .CLOEXEC})
+	if open_err != .NONE do return
+	defer linux.close(fd)
+
+	has_git := has_git_dir(fd)
 
 	gi_ctx := item.gi_ctx
 	rel := item.rel
@@ -221,58 +223,67 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 		gi_ctx = new_ctx
 	}
 
+	buf: [32768]u8
 	rel_buf: [4096]u8
 
-	for entry in entries {
-		if entry.name == ".git" do continue
+	for {
+		n, errno := linux.getdents(fd, buf[:])
+		if n <= 0 || errno != .NONE do break
 
-		is_dir := entry.type == .DIR
-		is_nondir := entry.type != .DIR
+		offs := 0
+		for d in linux.dirent_iterate_buf(buf[:n], &offs) {
+			name := linux.dirent_name(d)
+			if name == "." || name == ".." do continue
+			if name == ".git" do continue
 
-		if pool.exclude_gi != nil && is_ignored(pool.exclude_gi, entry.name, is_dir) {
-			continue
-		}
+			is_dir := d.type == .DIR
+			is_nondir := d.type != .DIR
 
-		if !pool.opts.include_hidden && len(entry.name) > 0 && entry.name[0] == '.' {
-			continue
-		}
-
-		entry_rel := build_rel(rel_buf[:], rel, entry.name)
-
-		ignored := false
-		if gi_ctx != nil && pool.opts.ignore_mode != .All {
-			ignored = check_chain(gi_ctx, entry_rel, is_dir)
-		}
-
-		should_emit: bool
-		if ignored {
-			should_emit = pool.opts.ignore_mode == .Ignored
-		} else {
-			should_emit = pool.opts.ignore_mode != .Ignored
-		}
-
-		if is_dir {
-			if should_emit && matches_pattern(pool, entry.name) {
-				dir_path_out := join_path_dir(dir_path, entry.name)
-				append(local_results, dir_path_out)
+			if pool.exclude_gi != nil && is_ignored(pool.exclude_gi, name, is_dir) {
+				continue
 			}
-			if !ignored {
-				child_rel, _ := strings.clone(entry_rel)
-				child_path := join_path(dir_path, entry.name)
-				push_work(
-					pool,
-					WorkItem {
-						path = child_path,
-						rel = child_rel,
-						gi_ctx = gi_ctx,
-						in_repo = child_in_repo,
-					},
-				)
+
+			if !pool.opts.include_hidden && len(name) > 0 && name[0] == '.' {
+				continue
 			}
-		} else if is_nondir {
-			if should_emit && matches_pattern(pool, entry.name) {
-				full_path := join_path(dir_path, entry.name)
-				append(local_results, full_path)
+
+			entry_rel := build_rel(rel_buf[:], rel, name)
+
+			ignored := false
+			if gi_ctx != nil && pool.opts.ignore_mode != .All {
+				ignored = check_chain(gi_ctx, entry_rel, is_dir)
+			}
+
+			should_emit: bool
+			if ignored {
+				should_emit = pool.opts.ignore_mode == .Ignored
+			} else {
+				should_emit = pool.opts.ignore_mode != .Ignored
+			}
+
+			if is_dir {
+				if should_emit && matches_pattern(pool, name) {
+					dir_path_out := join_path_dir(dir_path, name)
+					append(local_results, dir_path_out)
+				}
+				if !ignored {
+					child_rel, _ := strings.clone(entry_rel)
+					child_path := join_path(dir_path, name)
+					push_work(
+						pool,
+						WorkItem {
+							path = child_path,
+							rel = child_rel,
+							gi_ctx = gi_ctx,
+							in_repo = child_in_repo,
+						},
+					)
+				}
+			} else if is_nondir {
+				if should_emit && matches_pattern(pool, name) {
+					full_path := join_path(dir_path, name)
+					append(local_results, full_path)
+				}
 			}
 		}
 	}
@@ -330,46 +341,13 @@ push_work :: proc(pool: ^WalkerPool, item: WorkItem) {
 	sync.atomic_sema_post(&pool.queue_sema)
 }
 
-read_dir_entries :: proc(dir_path: string, has_git: ^bool) -> [dynamic]RawEntry {
-	entries := make([dynamic]RawEntry)
-
-	cpath := strings.clone_to_cstring(dir_path)
-	if cpath == nil do return entries
-
-	fd, err := linux.open(cpath, {.DIRECTORY, .CLOEXEC})
-	delete(cpath)
-	if err != .NONE do return entries
-
-	buf: [32 * 1024]u8
-	has_git^ = false
-
-	for {
-		n, errno := linux.getdents(fd, buf[:])
-		if n <= 0 || errno != .NONE do break
-
-		offs := 0
-		for d in linux.dirent_iterate_buf(buf[:n], &offs) {
-			name := linux.dirent_name(d)
-			if name == "." || name == ".." do continue
-
-			if name == ".git" && d.type == .DIR {
-				has_git^ = true
-			}
-
-			cloned := strings.clone(name)
-			append(&entries, RawEntry{name = cloned, type = d.type})
-		}
+has_git_dir :: proc(fd: linux.Fd) -> bool {
+	git_fd, err := linux.openat(fd, ".git", {.DIRECTORY, .CLOEXEC})
+	if err == .NONE {
+		linux.close(git_fd)
+		return true
 	}
-
-	linux.close(fd)
-	return entries
-}
-
-free_entries :: proc(entries: ^[dynamic]RawEntry) {
-	for &entry in entries {
-		delete(entry.name)
-	}
-	delete(entries^)
+	return false
 }
 
 load_ignore_patterns :: proc(dir_path: string, in_repo: bool) -> ^Gitignore {
