@@ -145,6 +145,9 @@ walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thre
 walk_worker :: proc(t: ^thread.Thread) {
 	pool := cast(^WalkerPool)t.data
 
+	local_results := make([dynamic]string, 0, 256)
+	defer delete(local_results)
+
 	for {
 		sync.atomic_sema_wait(&pool.queue_sema)
 
@@ -161,7 +164,7 @@ walk_worker :: proc(t: ^thread.Thread) {
 		ordered_remove(&pool.queue, last)
 		sync.mutex_unlock(&pool.queue_mutex)
 
-		process_dir(pool, item)
+		process_dir(pool, item, &local_results)
 		delete(item.path)
 		if len(item.rel) > 0 { delete(item.rel) }
 
@@ -170,9 +173,17 @@ walk_worker :: proc(t: ^thread.Thread) {
 			sync.one_shot_event_signal(&pool.done)
 		}
 	}
+
+	if len(local_results) > 0 {
+		sync.mutex_lock(&pool.results_mutex)
+		for res in local_results {
+			append(pool.results, res)
+		}
+		sync.mutex_unlock(&pool.results_mutex)
+	}
 }
 
-process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
+process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]string) {
 	dir_path := item.path
 	has_git := false
 	entries := read_dir_entries(dir_path, &has_git)
@@ -237,9 +248,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		if is_dir {
 			if should_emit && matches_pattern(pool, entry.name) {
 				dir_path_out := join_path_dir(dir_path, entry.name)
-				sync.mutex_lock(&pool.results_mutex)
-				append(pool.results, dir_path_out)
-				sync.mutex_unlock(&pool.results_mutex)
+				append(local_results, dir_path_out)
 			}
 			if !ignored {
 				child_rel, _ := strings.clone(entry_rel)
@@ -249,9 +258,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		} else if is_nondir {
 			if should_emit && matches_pattern(pool, entry.name) {
 				full_path := join_path(dir_path, entry.name)
-				sync.mutex_lock(&pool.results_mutex)
-				append(pool.results, full_path)
-				sync.mutex_unlock(&pool.results_mutex)
+				append(local_results, full_path)
 			}
 		}
 	}
