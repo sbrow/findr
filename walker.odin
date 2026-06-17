@@ -145,6 +145,9 @@ walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thre
 walk_worker :: proc(t: ^thread.Thread) {
 	pool := cast(^WalkerPool)t.data
 
+	prof_thread_init("walker")
+	defer prof_thread_destroy()
+
 	local_results := make([dynamic]string, 0, 256)
 	defer delete(local_results)
 

@@ -6,6 +6,9 @@ import "core:os"
 import "core:strings"
 
 main :: proc() {
+	prof_init()
+	defer prof_destroy()
+
 	args := os.args
 
 	opts: WalkOptions
