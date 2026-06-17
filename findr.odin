@@ -1,7 +1,6 @@
 package findr
 
 import "core:bufio"
-import "core:fmt"
 import "core:os"
 import "core:strings"
 
@@ -43,7 +42,7 @@ main :: proc() {
 				case 'I':
 					opts.ignore_mode = .All
 				case 'a':
-					// no-op: accepted for fd compatibility
+				// no-op: accepted for fd compatibility
 				}
 			}
 		case:
@@ -89,3 +88,4 @@ main :: proc() {
 	}
 	bufio.writer_flush(&w)
 }
+

@@ -1,27 +1,34 @@
-findr is ~2.3x slower than fd (case 1: 547ms vs 241ms). Opportunities:
+# Performance Ideas
 
-1. Per-thread result buffers (DONE)
-Each thread accumulates results locally, then merges once at exit. Eliminates per-result mutex contention.
+Current state after regex→glob migration. findr beats fd in 3/4 cases.
 
-2. Batched channel (fd's approach)
-Replace global results array + merge with a buffered channel of batches. Each worker fills a local batch (~256 items), sends it to a `chan.Chan([]string)` (capacity = 2 × threads). A receiver thread drains batches and collects/prints. Provides backpressure, streaming output, and per-batch (not global) synchronization. Enables sorting like fd does (buffer first 1000 results or 100ms, then stream).
+## Benchmark results (2026-06-17)
 
-3. Path allocation waste (join_path/join_path_dir)
-Every path construction spins up a strings.Builder, does fmt.sbprintf, to_string, clone, then builder_destroy — 2 heap allocs + 2 frees per path. Could be a simple memcpy into a stack buffer with a single alloc.
+| Case | fd | findr | Ratio |
+|------|------|-------|-------|
+| 1 `-E .jj` | 172ms | 135ms | **1.27x faster** |
+| 2 `-H` | 1.184s | 1.097s | **1.08x faster** |
+| 3 `-HI` | 1.251s | 1.670s | **1.34x slower** |
+| 4 `-E .git` | 274ms | 202ms | **1.36x faster** |
 
-4. Larger getdents buffer
-Currently 8KB. Increasing to 64KB+ means fewer syscalls per directory with many entries.
+Case 3 (`-HI`) skips gitignore entirely, so it's pure I/O + allocation. System time is 2x fd's (12.1s vs 5.5s), pointing to syscall/allocation overhead.
 
-5. Eliminate entry name cloning
-strings.clone(name) in read_dir_entries heap-allocates per dirent. Names are valid in the getdents buffer during process_dir, so the clone may be unnecessary.
+## Completed
 
-6. Arena allocator per thread
-Replace the default allocator for transient strings with a bump allocator — allocate in bulk, free all at once.
-2. Path allocation waste (join_path/join_path_dir)
-Every path construction spins up a strings.Builder, does fmt.sbprintf, to_string, clone, then builder_destroy — 2 heap allocs + 2 frees per path. Could be a simple memcpy into a stack buffer with a single alloc.
-3. Larger getdents buffer
-Currently 8KB. Increasing to 64KB+ means fewer syscalls per directory with many entries.
-4. Eliminate entry name cloning
-strings.clone(name) in read_dir_entries heap-allocates per dirent. Names are valid in the getdents buffer during process_dir, so the clone may be unnecessary.
-5. Arena allocator per thread
-Replace the default allocator for transient strings with a bump allocator — allocate in bulk, free all at once.
+1. **Per-thread result buffers** — each thread accumulates locally, merges once at exit. Eliminates per-result mutex contention.
+2. **Lean path join** — `join_path`/`join_path_dir` use stack buffer + `copy` + single alloc instead of `strings.Builder` + `fmt.sbprintf` + `clone`.
+3. **Regex→glob migration** — replaced regex NFA with backtracking glob matcher. Eliminated 27% of CPU spent on `add_thread`/`is_ignored`. Biggest win.
+
+## Remaining ideas
+
+1. **Larger getdents buffer** (8KB → 64KB+)
+   Fewer syscalls per directory with many entries. Low effort.
+
+2. **Eliminate entry name cloning**
+   `strings.clone(name)` in `read_dir_entries` heap-allocates per dirent. Names are valid in the getdents buffer during `process_dir`, so the clone may be unnecessary. Low effort.
+
+3. **Arena allocator per thread**
+   Bump allocator for all transient strings, free once at exit. Bigger change, helps everywhere.
+
+4. **Batched channel** (fd's approach)
+   Replace global results array with buffered channel of batches. Enables streaming output and sorting like fd does.

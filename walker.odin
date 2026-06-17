@@ -10,14 +10,14 @@ import "core:thread"
 
 IgnoreMode :: enum {
 	Respected, // skip gitignored, prune ignored dirs (fd -H default)
-	All,       // ignore .gitignore entirely, descend everywhere (fd -HI)
-	Ignored,   // emit ONLY gitignored files, prune ignored dirs (findr original)
+	All, // ignore .gitignore entirely, descend everywhere (fd -HI)
+	Ignored, // emit ONLY gitignored files, prune ignored dirs (findr original)
 }
 
 WalkOptions :: struct {
-	pattern:        string,  // regex on basename; "" = match all
+	pattern:        string, // regex on basename; "" = match all
 	excludes:       []string, // glob patterns to skip entirely (fd -E)
-	include_hidden: bool,    // true = include dotfiles (fd -H)
+	include_hidden: bool, // true = include dotfiles (fd -H)
 	ignore_mode:    IgnoreMode,
 }
 
@@ -27,16 +27,16 @@ RawEntry :: struct {
 }
 
 GIContext :: struct {
-	gi:       ^Gitignore,   // nil if this dir had no .gitignore
-	base_rel: string,       // relative path from repo root to this dir
-	parent:   ^GIContext,   // parent context (nil if repo root)
+	gi:       ^Gitignore, // nil if this dir had no .gitignore
+	base_rel: string, // relative path from repo root to this dir
+	parent:   ^GIContext, // parent context (nil if repo root)
 }
 
 WorkItem :: struct {
-	path:    string,        // absolute directory path
-	rel:     string,        // relative path from repo root ("" = root)
-	gi_ctx:  ^GIContext,    // gitignore chain (nil = outside any repo)
-	in_repo: bool,          // true if inside a git repo
+	path:    string, // absolute directory path
+	rel:     string, // relative path from repo root ("" = root)
+	gi_ctx:  ^GIContext, // gitignore chain (nil = outside any repo)
+	in_repo: bool, // true if inside a git repo
 }
 
 WalkerPool :: struct {
@@ -115,7 +115,7 @@ walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thre
 	delete(pool.threads)
 	for item in pool.queue {
 		delete(item.path)
-		if len(item.rel) > 0 { delete(item.rel) }
+		if len(item.rel) > 0 {delete(item.rel)}
 	}
 	delete(pool.queue)
 
@@ -169,7 +169,7 @@ walk_worker :: proc(t: ^thread.Thread) {
 
 		process_dir(pool, item, &local_results)
 		delete(item.path)
-		if len(item.rel) > 0 { delete(item.rel) }
+		if len(item.rel) > 0 {delete(item.rel)}
 
 		old := sync.atomic_sub_explicit(&pool.active, 1, .Release)
 		if old == 1 {
@@ -256,7 +256,15 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 			if !ignored {
 				child_rel, _ := strings.clone(entry_rel)
 				child_path := join_path(dir_path, entry.name)
-				push_work(pool, WorkItem{path = child_path, rel = child_rel, gi_ctx = gi_ctx, in_repo = child_in_repo})
+				push_work(
+					pool,
+					WorkItem {
+						path = child_path,
+						rel = child_rel,
+						gi_ctx = gi_ctx,
+						in_repo = child_in_repo,
+					},
+				)
 			}
 		} else if is_nondir {
 			if should_emit && matches_pattern(pool, entry.name) {
@@ -285,7 +293,8 @@ check_chain :: proc(ctx: ^GIContext, entry_rel: string, is_dir: bool) -> bool {
 relative_to :: proc(entry_rel, base_rel: string) -> string {
 	if len(base_rel) == 0 do return entry_rel
 	prefix_len := len(base_rel)
-	if len(entry_rel) > prefix_len && entry_rel[prefix_len] == '/' &&
+	if len(entry_rel) > prefix_len &&
+	   entry_rel[prefix_len] == '/' &&
 	   strings.has_prefix(entry_rel, base_rel) {
 		return entry_rel[prefix_len + 1:]
 	}
@@ -422,3 +431,4 @@ join_path_dir :: proc(parent, child: string) -> string {
 	buf[pos] = '/'
 	return string(buf)
 }
+
