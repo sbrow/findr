@@ -202,7 +202,10 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 
 	child_in_repo := has_git || item.in_repo
 
-	gi := load_ignore_patterns(dir_path, child_in_repo)
+	gi: ^Gitignore = nil
+	if pool.opts.ignore_mode != .All {
+		gi = load_ignore_patterns(dir_path, child_in_repo)
+	}
 	if gi != nil {
 		new_ctx := new(GIContext)
 		new_ctx.gi = gi
