@@ -1,6 +1,8 @@
 package findr
 
 import "core:os"
+import "core:strings"
+import "core:sys/linux"
 import "core:testing"
 
 // ============================================================================
@@ -362,5 +364,66 @@ test_no_hidden_skips_dotfiles :: proc(t: ^testing.T) {
 	assert_output(t, env, nil,
 		{include_hidden = false, ignore_mode = .Ignored},
 		{"repo/secrets.env"},
+	)
+}
+
+// ============================================================================
+// Special file type tests (SOCK, FIFO, CHR, BLK parity with fd)
+// ============================================================================
+
+@(test)
+test_fifo_emitted :: proc(t: ^testing.T) {
+	env := create_test_env()
+	defer destroy_test_env(&env)
+
+	create_git_repo(env, "repo")
+	create_file(env, "repo/.gitignore", "*.env\n")
+
+	fifo_path := join_path(env.temp_dir, "repo/test.fifo")
+	defer delete(fifo_path)
+	cpath := strings.clone_to_cstring(fifo_path)
+	defer delete(cpath)
+	linux.mknod(cpath, linux.S_IFIFO | linux.Mode{.IRUSR, .IWUSR}, 0)
+
+	assert_output(t, env, nil,
+		{include_hidden = true, ignore_mode = .All},
+		{"repo/", "repo/.gitignore", "repo/test.fifo"},
+	)
+}
+
+// ============================================================================
+// .ignore file support tests (fd respects .ignore in addition to .gitignore)
+// ============================================================================
+
+@(test)
+test_ignore_file_respected :: proc(t: ^testing.T) {
+	env := create_test_env()
+	defer destroy_test_env(&env)
+
+	create_git_repo(env, "repo")
+	create_file(env, "repo/.ignore", "*.tmp\n")
+	create_file(env, "repo/file.tmp")
+	create_file(env, "repo/file.txt")
+
+	assert_output(t, env, nil,
+		{include_hidden = true, ignore_mode = .Respected},
+		{"repo/", "repo/.ignore", "repo/file.txt"},
+	)
+}
+
+@(test)
+test_ignore_overrides_gitignore :: proc(t: ^testing.T) {
+	env := create_test_env()
+	defer destroy_test_env(&env)
+
+	create_git_repo(env, "repo")
+	create_file(env, "repo/.gitignore", "*.log\n")
+	create_file(env, "repo/.ignore", "important.log\n")
+	create_file(env, "repo/debug.log")
+	create_file(env, "repo/important.log")
+
+	assert_output(t, env, nil,
+		{include_hidden = true, ignore_mode = .Respected},
+		{"repo/", "repo/.gitignore", "repo/.ignore"},
 	)
 }

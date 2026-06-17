@@ -80,6 +80,20 @@ test_glob_backslash_escape :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_glob_hash_escaped :: proc(t: ^testing.T) {
+	result := glob_to_regex("#foo", false)
+	defer delete(result)
+	testing.expect_value(t, result, "(^|/)\\#foo(/.*)?$")
+}
+
+@(test)
+test_glob_hash_in_pattern :: proc(t: ^testing.T) {
+	result := glob_to_regex("#*#", false)
+	defer delete(result)
+	testing.expect_value(t, result, "(^|/)\\#[^/]*\\#(/.*)?$")
+}
+
+@(test)
 test_glob_empty :: proc(t: ^testing.T) {
 	result := glob_to_regex("", false)
 	defer delete(result)
@@ -174,5 +188,17 @@ test_is_ignored_globstar :: proc(t: ^testing.T) {
 	testing.expect_value(t, is_ignored(&gi, "cache", false), true)
 	testing.expect_value(t, is_ignored(&gi, "foo/cache", false), true)
 	testing.expect_value(t, is_ignored(&gi, "foo/bar/cache", false), true)
+}
+
+@(test)
+test_is_ignored_hash_pattern :: proc(t: ^testing.T) {
+	gi := parse("\\#*\\#\n")
+	defer destroy(&gi)
+
+	testing.expect_value(t, is_ignored(&gi, "#foo#", false), true)
+	testing.expect_value(t, is_ignored(&gi, "#test#", false), true)
+	testing.expect_value(t, is_ignored(&gi, "AUTHORS", false), false)
+	testing.expect_value(t, is_ignored(&gi, "build.zig", false), false)
+	testing.expect_value(t, is_ignored(&gi, "ChangeLog", false), false)
 }
 

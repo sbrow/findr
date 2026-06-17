@@ -4,15 +4,17 @@ import "core:fmt"
 import "core:strings"
 import "core:text/regex"
 
+// FIXME: Use a const bit_set[0..<128; u128] here when we start doing optimizations
 is_regex_meta :: proc(c: u8) -> bool {
 	switch c {
-	case '.', '+', '(', ')', '{', '}', '^', '$', '|':
+	case '.', '+', '(', ')', '{', '}', '^', '$', '|', '#':
 		return true
 	}
 	return false
 }
 
 glob_to_regex :: proc(pattern: string, anchored: bool) -> string {
+	// TODO: Attempt to pre-allocate the string builder when we start doing optimizations
 	sb: strings.Builder
 	strings.builder_init(&sb)
 	defer strings.builder_destroy(&sb)
@@ -98,8 +100,8 @@ glob_to_regex :: proc(pattern: string, anchored: bool) -> string {
 }
 
 Rule :: struct {
-	regex: regex.Regular_Expression,
-	negated: bool,
+	regex:    regex.Regular_Expression,
+	negated:  bool,
 	dir_only: bool,
 }
 
@@ -151,17 +153,17 @@ parse :: proc(content: string) -> Gitignore {
 		delete(regex_str)
 		if err != nil do continue
 
-		append(&gi.rules, Rule{
-			regex = re,
-			negated = negated,
-			dir_only = dir_only,
-		})
+		append(&gi.rules, Rule{regex = re, negated = negated, dir_only = dir_only})
 	}
 
 	return gi
 }
 
-Match :: enum { None, Ignored, Unignored }
+Match :: enum {
+	None,
+	Ignored,
+	Unignored,
+}
 
 check_match :: proc(gi: ^Gitignore, path: string, is_dir: bool) -> Match {
 	result := Match.None
@@ -186,3 +188,4 @@ destroy :: proc(gi: ^Gitignore) {
 	}
 	delete(gi.rules)
 }
+

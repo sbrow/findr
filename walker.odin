@@ -181,22 +181,20 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		rel = ""
 	}
 
-	if has_git || gi_ctx != nil {
-		gi := load_gitignore(dir_path)
-		if gi != nil {
-			new_ctx := new(GIContext)
-			new_ctx.gi = gi
-			if len(rel) > 0 {
-				new_ctx.base_rel, _ = strings.clone(rel)
-			}
-			new_ctx.parent = gi_ctx
-
-			sync.mutex_lock(&pool.contexts_lock)
-			append(&pool.all_contexts, new_ctx)
-			sync.mutex_unlock(&pool.contexts_lock)
-
-			gi_ctx = new_ctx
+	gi := load_ignore_patterns(dir_path, has_git || gi_ctx != nil)
+	if gi != nil {
+		new_ctx := new(GIContext)
+		new_ctx.gi = gi
+		if len(rel) > 0 {
+			new_ctx.base_rel, _ = strings.clone(rel)
 		}
+		new_ctx.parent = gi_ctx
+
+		sync.mutex_lock(&pool.contexts_lock)
+		append(&pool.all_contexts, new_ctx)
+		sync.mutex_unlock(&pool.contexts_lock)
+
+		gi_ctx = new_ctx
 	}
 
 	rel_buf: [4096]u8
@@ -205,7 +203,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		if entry.name == ".git" do continue
 
 		is_dir := entry.type == .DIR
-		is_regular := entry.type == .REG || entry.type == .UNKNOWN || entry.type == .LNK
+		is_nondir := entry.type != .DIR
 
 		if pool.exclude_gi != nil && is_ignored(pool.exclude_gi, entry.name, is_dir) {
 			continue
@@ -241,7 +239,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 				child_path := join_path(dir_path, entry.name)
 				push_work(pool, WorkItem{path = child_path, rel = child_rel, gi_ctx = gi_ctx})
 			}
-		} else if is_regular {
+		} else if is_nondir {
 			if should_emit && matches_pattern(pool, entry.name) {
 				full_path := join_path(dir_path, entry.name)
 				sync.mutex_lock(&pool.results_mutex)
@@ -345,16 +343,37 @@ free_entries :: proc(entries: ^[dynamic]RawEntry) {
 	delete(entries^)
 }
 
-load_gitignore :: proc(dir_path: string) -> ^Gitignore {
-	gi_path := join_path(dir_path, ".gitignore")
-	defer delete(gi_path)
+load_ignore_patterns :: proc(dir_path: string, in_repo: bool) -> ^Gitignore {
+	has_patterns := false
+	sb: strings.Builder
+	strings.builder_init(&sb)
+	defer strings.builder_destroy(&sb)
 
-	data, err := os.read_entire_file_from_path(gi_path, context.allocator)
-	if err != .NONE do return nil
+	if in_repo {
+		gi_path := join_path(dir_path, ".gitignore")
+		data, err := os.read_entire_file_from_path(gi_path, context.allocator)
+		delete(gi_path)
+		if err == .NONE {
+			fmt.sbprintf(&sb, "%s", string(data))
+			delete(data)
+			has_patterns = true
+		}
+	}
 
+	ig_path := join_path(dir_path, ".ignore")
+	idata, ierr := os.read_entire_file_from_path(ig_path, context.allocator)
+	delete(ig_path)
+	if ierr == .NONE {
+		fmt.sbprintf(&sb, "%s", string(idata))
+		delete(idata)
+		has_patterns = true
+	}
+
+	if !has_patterns do return nil
+
+	content := strings.to_string(sb)
 	gi := new(Gitignore)
-	gi^ = parse(string(data))
-	delete(data)
+	gi^ = parse(content)
 	return gi
 }
 
