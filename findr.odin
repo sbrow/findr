@@ -1,5 +1,6 @@
 package findr
 
+import "core:bufio"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -75,7 +76,13 @@ main :: proc() {
 	thread_count := os.get_processor_core_count()
 	walk(paths[:], &results, opts, thread_count)
 
+	w: bufio.Writer
+	bufio.writer_init(&w, os.to_stream(os.stdout), 1 << 13)
+	defer bufio.writer_destroy(&w)
+
 	for r in results {
-		fmt.println(r)
+		bufio.writer_write_string(&w, r)
+		bufio.writer_write_byte(&w, '\n')
 	}
+	bufio.writer_flush(&w)
 }
