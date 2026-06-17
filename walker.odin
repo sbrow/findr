@@ -47,7 +47,7 @@ WalkerPool :: struct {
 	results_mutex: sync.Mutex,
 	active:        i64,
 	done:          sync.One_Shot_Event,
-	threads:       [dynamic]^thread.Thread,
+	threads:       []^thread.Thread,
 	opts:          WalkOptions,
 	pattern_re:    regex.Regular_Expression,
 	has_pattern:   bool,
@@ -63,7 +63,7 @@ walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thre
 	pool.queue = make([dynamic]WorkItem)
 	pool.results = results
 	pool.active = i64(len(roots))
-	pool.threads = make([dynamic]^thread.Thread)
+	pool.threads = make([]^thread.Thread, thread_count)
 	pool.all_contexts = make([dynamic]^GIContext)
 	pool.opts = opts
 	pool.exclude_gi = nil
@@ -100,7 +100,7 @@ walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thre
 		t.data = rawptr(pool)
 		t.init_context = context
 		thread.start(t)
-		append(&pool.threads, t)
+		pool.threads[i] = t
 	}
 
 	sync.one_shot_event_wait(&pool.done)
