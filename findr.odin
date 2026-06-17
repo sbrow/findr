@@ -7,7 +7,7 @@ import "core:sync/chan"
 import "core:thread"
 
 Writer_Data :: struct {
-	ch: chan.Chan([]string),
+	ch: chan.Chan([]u8),
 }
 
 output_writer :: proc(t: ^thread.Thread) {
@@ -18,13 +18,8 @@ output_writer :: proc(t: ^thread.Thread) {
 	defer bufio.writer_destroy(&w)
 
 	for {
-		batch, ok := chan.recv(data.ch)
-		if !ok do break
-		for s in batch {
-			bufio.writer_write_string(&w, s)
-			bufio.writer_write_byte(&w, '\n')
-			delete(s)
-		}
+		batch := chan.recv(data.ch) or_break
+		bufio.writer_write(&w, batch)
 		delete(batch)
 	}
 	bufio.writer_flush(&w)
@@ -97,7 +92,7 @@ main :: proc() {
 
 	thread_count := os.get_processor_core_count()
 
-	ch, _ := chan.create(chan.Chan([]string), max(2 * thread_count, 2), context.allocator)
+	ch, _ := chan.create(chan.Chan([]u8), max(2 * thread_count, 2), context.allocator)
 	defer chan.destroy(ch)
 
 	wdata := new(Writer_Data)

@@ -9,7 +9,7 @@ import "core:sys/linux"
 import "core:text/regex"
 import "core:thread"
 
-BATCH_SIZE :: 256
+OUTPUT_BUF_SIZE :: 64 * 1024
 
 IgnoreMode :: enum {
 	Respected, // skip gitignored, prune ignored dirs (fd -H default)
@@ -38,31 +38,49 @@ WorkItem :: struct {
 }
 
 WalkerPool :: struct {
-	queue:        [dynamic]WorkItem,
-	queue_mutex:  sync.Mutex,
-	queue_sema:   sync.Atomic_Sema,
-	result_chan:  chan.Chan([]string),
-	active:       i64,
-	done:         sync.One_Shot_Event,
-	threads:      []^thread.Thread,
-	opts:         WalkOptions,
-	pattern_re:   regex.Regular_Expression,
-	has_pattern:  bool,
-	exclude_gi:   ^Gitignore,
-	all_contexts: [dynamic]^GIContext,
+	queue:         [dynamic]WorkItem,
+	queue_mutex:   sync.Mutex,
+	queue_sema:    sync.Atomic_Sema,
+	result_chan:   chan.Chan([]u8),
+	active:        i64,
+	done:          sync.One_Shot_Event,
+	threads:       []^thread.Thread,
+	opts:          WalkOptions,
+	pattern_re:    regex.Regular_Expression,
+	has_pattern:   bool,
+	exclude_gi:    ^Gitignore,
+	all_contexts:  [dynamic]^GIContext,
 	contexts_lock: sync.Mutex,
 }
 
-flush_batch :: proc(ch: chan.Chan([]string), local: ^[dynamic]string) {
+flush_buf :: proc(ch: chan.Chan([]u8), local: ^[dynamic]u8) {
 	if len(local) == 0 do return
 	batch := local[:]
-	local^ = make([dynamic]string, 0, BATCH_SIZE)
+	local^ = make([dynamic]u8, 0, OUTPUT_BUF_SIZE)
 	chan.send(ch, batch)
+}
+
+append_path :: proc(buf: ^[dynamic]u8, parent, name: string, trailing_slash: bool) {
+	need_sep := len(parent) > 0 && parent[len(parent) - 1] != '/'
+	size := len(parent) + len(name) + 1
+	if need_sep do size += 1
+	if trailing_slash do size += 1
+
+	old_len := len(buf)
+	reserve(buf, old_len + size)
+	resize(buf, old_len + size)
+
+	pos := old_len
+	pos += copy(buf[pos:], parent)
+	if need_sep {buf[pos] = '/'; pos += 1}
+	pos += copy(buf[pos:], name)
+	if trailing_slash {buf[pos] = '/'; pos += 1}
+	buf[pos] = '\n'
 }
 
 walk_stream :: proc(
 	roots: []string,
-	result_chan: chan.Chan([]string),
+	result_chan: chan.Chan([]u8),
 	opts: WalkOptions,
 	thread_count: int,
 ) {
@@ -152,7 +170,7 @@ walk_stream :: proc(
 }
 
 Collector_Data :: struct {
-	ch:      chan.Chan([]string),
+	ch:      chan.Chan([]u8),
 	results: ^[dynamic]string,
 }
 
@@ -161,8 +179,15 @@ collect_worker :: proc(t: ^thread.Thread) {
 	for {
 		batch, ok := chan.recv(data.ch)
 		if !ok do break
-		for s in batch {
-			append(data.results, s)
+		start := 0
+		for i in 0 ..< len(batch) {
+			if batch[i] == '\n' {
+				if i > start {
+					s, _ := strings.clone(string(batch[start:i]))
+					append(data.results, s)
+				}
+				start = i + 1
+			}
 		}
 		delete(batch)
 	}
@@ -171,7 +196,7 @@ collect_worker :: proc(t: ^thread.Thread) {
 walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thread_count: int) {
 	if len(roots) == 0 do return
 
-	ch, _ := chan.create(chan.Chan([]string), max(2 * thread_count, 2), context.allocator)
+	ch, _ := chan.create(chan.Chan([]u8), max(2 * thread_count, 2), context.allocator)
 	defer chan.destroy(ch)
 
 	data := new(Collector_Data)
@@ -197,12 +222,12 @@ walk_worker :: proc(t: ^thread.Thread) {
 	prof_thread_init("walker")
 	defer prof_thread_destroy()
 
-	local_results := make([dynamic]string, 0, BATCH_SIZE)
+	local_buf := make([dynamic]u8, 0, OUTPUT_BUF_SIZE)
 	defer {
-		if len(local_results) > 0 {
-			flush_batch(pool.result_chan, &local_results)
+		if len(local_buf) > 0 {
+			flush_buf(pool.result_chan, &local_buf)
 		}
-		delete(local_results)
+		delete(local_buf)
 	}
 
 	for {
@@ -221,12 +246,12 @@ walk_worker :: proc(t: ^thread.Thread) {
 		ordered_remove(&pool.queue, last)
 		sync.mutex_unlock(&pool.queue_mutex)
 
-		process_dir(pool, item, &local_results)
+		process_dir(pool, item, &local_buf)
 		delete(item.path)
 		if len(item.rel) > 0 {delete(item.rel)}
 
-		if len(local_results) >= BATCH_SIZE {
-			flush_batch(pool.result_chan, &local_results)
+		if len(local_buf) >= OUTPUT_BUF_SIZE {
+			flush_buf(pool.result_chan, &local_buf)
 		}
 
 		old := sync.atomic_sub_explicit(&pool.active, 1, .Release)
@@ -236,7 +261,7 @@ walk_worker :: proc(t: ^thread.Thread) {
 	}
 }
 
-process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]string) {
+process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_buf: ^[dynamic]u8) {
 	dir_path := item.path
 
 	cpath := strings.clone_to_cstring(dir_path)
@@ -281,7 +306,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 		gi_ctx = new_ctx
 	}
 
-	buf: [32768]u8
+	buf: [32 * 1024]u8
 	rel_buf: [4096]u8
 
 	for {
@@ -321,8 +346,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 
 			if is_dir {
 				if should_emit && matches_pattern(pool, name) {
-					dir_path_out := join_path_dir(dir_path, name)
-					append(local_results, dir_path_out)
+					append_path(local_buf, dir_path, name, true)
 				}
 				if !ignored {
 					child_rel, _ := strings.clone(entry_rel)
@@ -339,8 +363,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 				}
 			} else if is_nondir {
 				if should_emit && matches_pattern(pool, name) {
-					full_path := join_path(dir_path, name)
-					append(local_results, full_path)
+					append_path(local_buf, dir_path, name, false)
 				}
 			}
 		}
