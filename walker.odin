@@ -337,7 +337,7 @@ read_dir_entries :: proc(dir_path: string, has_git: ^bool) -> [dynamic]RawEntry 
 	delete(cpath)
 	if err != .NONE do return entries
 
-	buf: [8192]u8
+	buf: [32 * 1024]u8
 	has_git^ = false
 
 	for {
