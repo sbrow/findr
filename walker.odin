@@ -392,33 +392,30 @@ load_ignore_patterns :: proc(dir_path: string, in_repo: bool) -> ^Gitignore {
 }
 
 join_path :: proc(parent, child: string) -> string {
-	b: strings.Builder
-	strings.builder_init(&b)
-	defer strings.builder_destroy(&b)
-
-	fmt.sbprintf(&b, "%s", parent)
-	if len(parent) == 0 || parent[len(parent) - 1] != '/' {
-		fmt.sbprintf(&b, "/")
+	need_sep := len(parent) == 0 || parent[len(parent) - 1] != '/'
+	total := len(parent) + len(child)
+	if need_sep do total += 1
+	buf := make([]u8, total, context.allocator)
+	pos := copy(buf, parent)
+	if need_sep {
+		buf[pos] = '/'
+		pos += 1
 	}
-	fmt.sbprintf(&b, "%s", child)
-
-	s := strings.to_string(b)
-	result, _ := strings.clone(s)
-	return result
+	copy(buf[pos:], child)
+	return string(buf)
 }
 
 join_path_dir :: proc(parent, child: string) -> string {
-	b: strings.Builder
-	strings.builder_init(&b)
-	defer strings.builder_destroy(&b)
-
-	fmt.sbprintf(&b, "%s", parent)
-	if len(parent) == 0 || parent[len(parent) - 1] != '/' {
-		fmt.sbprintf(&b, "/")
+	need_sep := len(parent) == 0 || parent[len(parent) - 1] != '/'
+	total := len(parent) + len(child) + 1 // +1 for trailing '/'
+	if need_sep do total += 1
+	buf := make([]u8, total, context.allocator)
+	pos := copy(buf, parent)
+	if need_sep {
+		buf[pos] = '/'
+		pos += 1
 	}
-	fmt.sbprintf(&b, "%s/", child)
-
-	s := strings.to_string(b)
-	result, _ := strings.clone(s)
-	return result
+	pos += copy(buf[pos:], child)
+	buf[pos] = '/'
+	return string(buf)
 }
