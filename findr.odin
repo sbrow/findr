@@ -3,6 +3,32 @@ package findr
 import "core:bufio"
 import "core:os"
 import "core:strings"
+import "core:sync/chan"
+import "core:thread"
+
+Writer_Data :: struct {
+	ch: chan.Chan([]string),
+}
+
+output_writer :: proc(t: ^thread.Thread) {
+	data := cast(^Writer_Data)t.data
+
+	w: bufio.Writer
+	bufio.writer_init(&w, os.to_stream(os.stdout), 1 << 13)
+	defer bufio.writer_destroy(&w)
+
+	for {
+		batch, ok := chan.recv(data.ch)
+		if !ok do break
+		for s in batch {
+			bufio.writer_write_string(&w, s)
+			bufio.writer_write_byte(&w, '\n')
+			delete(s)
+		}
+		delete(batch)
+	}
+	bufio.writer_flush(&w)
+}
 
 main :: proc() {
 	prof_init()
@@ -69,23 +95,24 @@ main :: proc() {
 		append(&paths, ".")
 	}
 
-	results := make([dynamic]string)
-	defer {
-		for r in results {delete(r)}
-		delete(results)
-	}
-
 	thread_count := os.get_processor_core_count()
-	walk(paths[:], &results, opts, thread_count)
 
-	w: bufio.Writer
-	bufio.writer_init(&w, os.to_stream(os.stdout), 1 << 13)
-	defer bufio.writer_destroy(&w)
+	ch, _ := chan.create(chan.Chan([]string), max(2 * thread_count, 2), context.allocator)
+	defer chan.destroy(ch)
 
-	for r in results {
-		bufio.writer_write_string(&w, r)
-		bufio.writer_write_byte(&w, '\n')
-	}
-	bufio.writer_flush(&w)
+	wdata := new(Writer_Data)
+	wdata.ch = ch
+	defer free(wdata)
+
+	writer := thread.create(output_writer)
+	writer.data = rawptr(wdata)
+	writer.init_context = context
+	thread.start(writer)
+
+	walk_stream(paths[:], ch, opts, thread_count)
+
+	chan.close(ch)
+	thread.join(writer)
+	thread.destroy(writer)
 }
 
