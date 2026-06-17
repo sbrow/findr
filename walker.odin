@@ -192,7 +192,10 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem, local_results: ^[dynamic]
 	if open_err != .NONE do return
 	defer linux.close(fd)
 
-	has_git := has_git_dir(fd)
+	has_git := false
+	if pool.opts.ignore_mode != .All {
+		has_git = has_git_dir(fd)
+	}
 
 	gi_ctx := item.gi_ctx
 	rel := item.rel
