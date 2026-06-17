@@ -73,9 +73,7 @@ main :: proc() {
 	}
 
 	thread_count := os.get_processor_core_count()
-	for dir in paths {
-		walk(dir, &results, opts, thread_count)
-	}
+	walk(paths[:], &results, opts, thread_count)
 
 	for r in results {
 		fmt.println(r)

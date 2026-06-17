@@ -1,6 +1,7 @@
 package findr
 
 import "core:os"
+import "core:sort"
 import "core:strings"
 import "core:sys/linux"
 import "core:testing"
@@ -218,6 +219,7 @@ test_multiple_search_dirs :: proc(t: ^testing.T) {
 	create_git_repo(env, "dir1/repo")
 	create_file(env, "dir1/repo/.gitignore", "*.env\n")
 	create_file(env, "dir1/repo/a.env")
+	create_file(env, "dir1/repo/normal.txt")
 
 	create_git_repo(env, "dir2/repo")
 	create_file(env, "dir2/repo/.gitignore", "*.env\n")
@@ -236,9 +238,31 @@ test_multiple_search_dirs :: proc(t: ^testing.T) {
 
 	opts := WalkOptions{include_hidden = true, ignore_mode = .Ignored}
 	thread_count := os.get_processor_core_count()
-	walk(dir1, &results, opts, thread_count)
-	walk(dir2, &results, opts, thread_count)
+	walk({dir1, dir2}, &results, opts, thread_count)
+
 	testing.expect_value(t, len(results), 2)
+
+	actual := make([dynamic]string, 0, len(results))
+	for r in results {
+		stripped := r
+		if strings.has_prefix(stripped, env.temp_dir) {
+			stripped = stripped[len(env.temp_dir):]
+			if len(stripped) > 0 && stripped[0] == '/' {
+				stripped = stripped[1:]
+			}
+		}
+		append(&actual, stripped)
+	}
+	defer delete(actual)
+
+	expected := []string{"dir1/repo/a.env", "dir2/repo/b.env"}
+
+	sort.quick_sort(actual[:])
+	sort.quick_sort(expected[:])
+
+	for i in 0 ..< len(expected) {
+		testing.expect_value(t, actual[i], expected[i])
+	}
 }
 
 // ============================================================================
@@ -388,6 +412,27 @@ test_fifo_emitted :: proc(t: ^testing.T) {
 	assert_output(t, env, nil,
 		{include_hidden = true, ignore_mode = .All},
 		{"repo/", "repo/.gitignore", "repo/test.fifo"},
+	)
+}
+
+// ============================================================================
+// in_repo propagation tests
+// ============================================================================
+
+@(test)
+test_repo_without_root_gitignore :: proc(t: ^testing.T) {
+	env := create_test_env()
+	defer destroy_test_env(&env)
+
+	create_git_repo(env, "repo")
+	create_dir(env, "repo/sub")
+	create_file(env, "repo/sub/.gitignore", "*.tmp\n")
+	create_file(env, "repo/sub/file.tmp")
+	create_file(env, "repo/sub/file.txt")
+
+	assert_output(t, env, nil,
+		{include_hidden = true, ignore_mode = .Respected},
+		{"repo/", "repo/sub/", "repo/sub/.gitignore", "repo/sub/file.txt"},
 	)
 }
 

@@ -92,7 +92,7 @@ glob_to_regex :: proc(pattern: string, anchored: bool) -> string {
 		}
 	}
 
-	fmt.sbprintf(&sb, "(/.*)?$")
+	fmt.sbprintf(&sb, "$")
 
 	s := strings.to_string(sb)
 	result, _ := strings.clone(s)

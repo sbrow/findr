@@ -133,9 +133,7 @@ collect_results :: proc(env: TestEnv, args: []string, opts: WalkOptions) -> [dyn
 	for a in args {append(&full_args, a)}
 
 	thread_count := os.get_processor_core_count()
-	for dir in full_args {
-		walk(dir, &results, opts, thread_count)
-	}
+	walk(full_args[:], &results, opts, thread_count)
 
 	for i in 0 ..< len(results) {
 		r := results[i]

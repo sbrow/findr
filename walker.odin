@@ -36,6 +36,7 @@ WorkItem :: struct {
 	path:    string,        // absolute directory path
 	rel:     string,        // relative path from repo root ("" = root)
 	gi_ctx:  ^GIContext,    // gitignore chain (nil = outside any repo)
+	in_repo: bool,          // true if inside a git repo
 }
 
 WalkerPool :: struct {
@@ -55,11 +56,13 @@ WalkerPool :: struct {
 	contexts_lock: sync.Mutex,
 }
 
-walk :: proc(root: string, results: ^[dynamic]string, opts: WalkOptions, thread_count: int) {
+walk :: proc(roots: []string, results: ^[dynamic]string, opts: WalkOptions, thread_count: int) {
+	if len(roots) == 0 do return
+
 	pool := new(WalkerPool)
 	pool.queue = make([dynamic]WorkItem)
 	pool.results = results
-	pool.active = 1
+	pool.active = i64(len(roots))
 	pool.threads = make([dynamic]^thread.Thread)
 	pool.all_contexts = make([dynamic]^GIContext)
 	pool.opts = opts
@@ -86,9 +89,11 @@ walk :: proc(root: string, results: ^[dynamic]string, opts: WalkOptions, thread_
 		strings.builder_destroy(&sb)
 	}
 
-	root_clone, _ := strings.clone(root)
-	append(&pool.queue, WorkItem{path = root_clone})
-	sync.atomic_sema_post(&pool.queue_sema)
+	for root in roots {
+		root_clone, _ := strings.clone(root)
+		append(&pool.queue, WorkItem{path = root_clone})
+		sync.atomic_sema_post(&pool.queue_sema)
+	}
 
 	for i in 0 ..< thread_count {
 		t := thread.create(walk_worker)
@@ -181,7 +186,9 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		rel = ""
 	}
 
-	gi := load_ignore_patterns(dir_path, has_git || gi_ctx != nil)
+	child_in_repo := has_git || item.in_repo
+
+	gi := load_ignore_patterns(dir_path, child_in_repo)
 	if gi != nil {
 		new_ctx := new(GIContext)
 		new_ctx.gi = gi
@@ -237,7 +244,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 			if !ignored {
 				child_rel, _ := strings.clone(entry_rel)
 				child_path := join_path(dir_path, entry.name)
-				push_work(pool, WorkItem{path = child_path, rel = child_rel, gi_ctx = gi_ctx})
+				push_work(pool, WorkItem{path = child_path, rel = child_rel, gi_ctx = gi_ctx, in_repo = child_in_repo})
 			}
 		} else if is_nondir {
 			if should_emit && matches_pattern(pool, entry.name) {
