@@ -1,0 +1,5 @@
+/findr
+/findr-prof
+*.spall
+bench-output-*.md
+bench-results.md
