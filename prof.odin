@@ -1,10 +1,18 @@
 package findr
 
 import "base:runtime"
+import "core:os"
 import "core:prof/spall"
 import "core:sync"
+import "core:sys/linux"
 
 SPALL_ENABLED :: #config(SPALL_ENABLED, ODIN_DEBUG)
+
+SPALL_MAX_BYTES :: 1 * 1024 * 1024 * 1024
+
+_SPALL_LIMIT_MSG := "findr: spall recording reached 1 GiB limit, exiting\n"
+
+spall_bytes_written: int
 
 spall_ctx: spall.Context
 
@@ -17,6 +25,14 @@ spall_enter :: proc "contextless" (
 	loc: runtime.Source_Code_Location,
 ) {
 	when SPALL_ENABLED {
+		if spall_buffer.head + spall.BEGIN_EVENT_MAX > len(spall_buffer.data) {
+			spall_bytes_written += spall_buffer.head
+			if spall_bytes_written >= SPALL_MAX_BYTES {
+				linux.write(2, transmute([]u8)_SPALL_LIMIT_MSG)
+				spall.buffer_flush(&spall_ctx, &spall_buffer)
+				os.exit(0)
+			}
+		}
 		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
 	}
 }
@@ -27,6 +43,14 @@ spall_exit :: proc "contextless" (
 	loc: runtime.Source_Code_Location,
 ) {
 	when SPALL_ENABLED {
+		if spall_buffer.head + size_of(spall.End_Event) > len(spall_buffer.data) {
+			spall_bytes_written += spall_buffer.head
+			if spall_bytes_written >= SPALL_MAX_BYTES {
+				linux.write(2, transmute([]u8)_SPALL_LIMIT_MSG)
+				spall.buffer_flush(&spall_ctx, &spall_buffer)
+				os.exit(0)
+			}
+		}
 		spall._buffer_end(&spall_ctx, &spall_buffer)
 	}
 }
