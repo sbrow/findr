@@ -60,8 +60,14 @@ create_git_repo :: proc(env: TestEnv, path: string) {
 	create_dir(env, sub)
 }
 
-assert_output :: proc(t: ^testing.T, env: TestEnv, args: []string, expected: []string) {
-	results := collect_results(env, args)
+assert_output :: proc(
+	t: ^testing.T,
+	env: TestEnv,
+	args: []string,
+	opts: WalkOptions,
+	expected: []string,
+) {
+	results := collect_results(env, args, opts)
 	defer {
 		for r in results {delete(r)}
 		delete(results)
@@ -99,8 +105,13 @@ assert_output :: proc(t: ^testing.T, env: TestEnv, args: []string, expected: []s
 	}
 }
 
-assert_output_empty :: proc(t: ^testing.T, env: TestEnv, args: []string) {
-	results := collect_results(env, args)
+assert_output_empty :: proc(
+	t: ^testing.T,
+	env: TestEnv,
+	args: []string,
+	opts: WalkOptions,
+) {
+	results := collect_results(env, args, opts)
 	defer {
 		for r in results {delete(r)}
 		delete(results)
@@ -114,7 +125,7 @@ assert_output_empty :: proc(t: ^testing.T, env: TestEnv, args: []string) {
 	}
 }
 
-collect_results :: proc(env: TestEnv, args: []string) -> [dynamic]string {
+collect_results :: proc(env: TestEnv, args: []string, opts: WalkOptions) -> [dynamic]string {
 	results := make([dynamic]string)
 
 	full_args := make([dynamic]string, 0, len(args) + 1, context.temp_allocator)
@@ -123,7 +134,7 @@ collect_results :: proc(env: TestEnv, args: []string) -> [dynamic]string {
 
 	thread_count := os.get_processor_core_count()
 	for dir in full_args {
-		walk(dir, &results, thread_count)
+		walk(dir, &results, opts, thread_count)
 	}
 
 	for i in 0 ..< len(results) {
@@ -141,4 +152,3 @@ collect_results :: proc(env: TestEnv, args: []string) -> [dynamic]string {
 
 	return results
 }
-

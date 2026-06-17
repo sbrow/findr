@@ -5,15 +5,41 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:sys/linux"
+import "core:text/regex"
 import "core:thread"
+
+IgnoreMode :: enum {
+	Respected, // skip gitignored, prune ignored dirs (fd -H default)
+	All,       // ignore .gitignore entirely, descend everywhere (fd -HI)
+	Ignored,   // emit ONLY gitignored files, prune ignored dirs (findr original)
+}
+
+WalkOptions :: struct {
+	pattern:        string,  // regex on basename; "" = match all
+	excludes:       []string, // glob patterns to skip entirely (fd -E)
+	include_hidden: bool,    // true = include dotfiles (fd -H)
+	ignore_mode:    IgnoreMode,
+}
 
 RawEntry :: struct {
 	name: string,
 	type: linux.Dirent_Type,
 }
 
+GIContext :: struct {
+	gi:       ^Gitignore,   // nil if this dir had no .gitignore
+	base_rel: string,       // relative path from repo root to this dir
+	parent:   ^GIContext,   // parent context (nil if repo root)
+}
+
+WorkItem :: struct {
+	path:    string,        // absolute directory path
+	rel:     string,        // relative path from repo root ("" = root)
+	gi_ctx:  ^GIContext,    // gitignore chain (nil = outside any repo)
+}
+
 WalkerPool :: struct {
-	queue:         [dynamic]string,
+	queue:         [dynamic]WorkItem,
 	queue_mutex:   sync.Mutex,
 	queue_sema:    sync.Atomic_Sema,
 	results:       ^[dynamic]string,
@@ -21,17 +47,47 @@ WalkerPool :: struct {
 	active:        i64,
 	done:          sync.One_Shot_Event,
 	threads:       [dynamic]^thread.Thread,
+	opts:          WalkOptions,
+	pattern_re:    regex.Regular_Expression,
+	has_pattern:   bool,
+	exclude_gi:    ^Gitignore,
+	all_contexts:  [dynamic]^GIContext,
+	contexts_lock: sync.Mutex,
 }
 
-walk :: proc(root: string, results: ^[dynamic]string, thread_count: int) {
+walk :: proc(root: string, results: ^[dynamic]string, opts: WalkOptions, thread_count: int) {
 	pool := new(WalkerPool)
-	pool.queue = make([dynamic]string)
+	pool.queue = make([dynamic]WorkItem)
 	pool.results = results
 	pool.active = 1
 	pool.threads = make([dynamic]^thread.Thread)
+	pool.all_contexts = make([dynamic]^GIContext)
+	pool.opts = opts
+	pool.exclude_gi = nil
+	pool.has_pattern = false
+
+	if len(opts.pattern) > 0 {
+		re, err := regex.create(opts.pattern, {regex.Flag.No_Capture})
+		if err == nil {
+			pool.pattern_re = re
+			pool.has_pattern = true
+		}
+	}
+
+	if len(opts.excludes) > 0 {
+		sb: strings.Builder
+		strings.builder_init(&sb)
+		for ex in opts.excludes {
+			fmt.sbprintf(&sb, "%s\n", ex)
+		}
+		content := strings.to_string(sb)
+		pool.exclude_gi = new(Gitignore)
+		pool.exclude_gi^ = parse(content)
+		strings.builder_destroy(&sb)
+	}
 
 	root_clone, _ := strings.clone(root)
-	append(&pool.queue, root_clone)
+	append(&pool.queue, WorkItem{path = root_clone})
 	sync.atomic_sema_post(&pool.queue_sema)
 
 	for i in 0 ..< thread_count {
@@ -52,10 +108,32 @@ walk :: proc(root: string, results: ^[dynamic]string, thread_count: int) {
 		thread.destroy(t)
 	}
 	delete(pool.threads)
-	for path in pool.queue {
-		delete(path)
+	for item in pool.queue {
+		delete(item.path)
+		if len(item.rel) > 0 { delete(item.rel) }
 	}
 	delete(pool.queue)
+
+	for ctx in pool.all_contexts {
+		if ctx.gi != nil {
+			destroy(ctx.gi)
+			free(ctx.gi)
+		}
+		if len(ctx.base_rel) > 0 {
+			delete(ctx.base_rel)
+		}
+		free(ctx)
+	}
+	delete(pool.all_contexts)
+
+	if pool.has_pattern {
+		regex.destroy(pool.pattern_re)
+	}
+	if pool.exclude_gi != nil {
+		destroy(pool.exclude_gi)
+		free(pool.exclude_gi)
+	}
+
 	free(pool)
 }
 
@@ -74,12 +152,13 @@ walk_worker :: proc(t: ^thread.Thread) {
 			break
 		}
 		last := len(pool.queue) - 1
-		dir_path := pool.queue[last]
+		item := pool.queue[last]
 		ordered_remove(&pool.queue, last)
 		sync.mutex_unlock(&pool.queue_mutex)
 
-		process_dir(pool, dir_path)
-		delete(dir_path)
+		process_dir(pool, item)
+		delete(item.path)
+		if len(item.rel) > 0 { delete(item.rel) }
 
 		old := sync.atomic_sub_explicit(&pool.active, 1, .Release)
 		if old == 1 {
@@ -88,49 +167,132 @@ walk_worker :: proc(t: ^thread.Thread) {
 	}
 }
 
-process_dir :: proc(pool: ^WalkerPool, dir_path: string) {
+process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
+	dir_path := item.path
 	has_git := false
 	entries := read_dir_entries(dir_path, &has_git)
 	defer free_entries(&entries)
 
+	gi_ctx := item.gi_ctx
+	rel := item.rel
+
 	if has_git {
+		gi_ctx = nil
+		rel = ""
+	}
+
+	if has_git || gi_ctx != nil {
 		gi := load_gitignore(dir_path)
-		defer if gi != nil {
-			destroy(gi)
-			free(gi)
+		if gi != nil {
+			new_ctx := new(GIContext)
+			new_ctx.gi = gi
+			if len(rel) > 0 {
+				new_ctx.base_rel, _ = strings.clone(rel)
+			}
+			new_ctx.parent = gi_ctx
+
+			sync.mutex_lock(&pool.contexts_lock)
+			append(&pool.all_contexts, new_ctx)
+			sync.mutex_unlock(&pool.contexts_lock)
+
+			gi_ctx = new_ctx
+		}
+	}
+
+	rel_buf: [4096]u8
+
+	for entry in entries {
+		if entry.name == ".git" do continue
+
+		is_dir := entry.type == .DIR
+		is_regular := entry.type == .REG || entry.type == .UNKNOWN
+
+		if pool.exclude_gi != nil && is_ignored(pool.exclude_gi, entry.name, is_dir) {
+			continue
 		}
 
-		for entry in entries {
-			if entry.name == ".git" do continue
-			is_dir := entry.type == .DIR
-			if gi != nil && is_ignored(gi, entry.name, is_dir) {
-				if !is_dir {
-					full_path := join_path(dir_path, entry.name)
-					sync.mutex_lock(&pool.results_mutex)
-					append(pool.results, full_path)
-					sync.mutex_unlock(&pool.results_mutex)
-				}
-				continue
-			}
-			if is_dir {
-				child_path := join_path(dir_path, entry.name)
-				push_work(pool, child_path)
-			}
+		if !pool.opts.include_hidden && len(entry.name) > 0 && entry.name[0] == '.' {
+			continue
 		}
-	} else {
-		for entry in entries {
-			if entry.type == .DIR {
+
+		entry_rel := build_rel(rel_buf[:], rel, entry.name)
+
+		ignored := false
+		if gi_ctx != nil && pool.opts.ignore_mode != .All {
+			ignored = check_chain(gi_ctx, entry_rel, is_dir)
+		}
+
+		should_emit: bool
+		if ignored {
+			should_emit = pool.opts.ignore_mode == .Ignored
+		} else {
+			should_emit = pool.opts.ignore_mode != .Ignored
+		}
+
+		if is_dir {
+			if !ignored {
+				child_rel, _ := strings.clone(entry_rel)
 				child_path := join_path(dir_path, entry.name)
-				push_work(pool, child_path)
+				push_work(pool, WorkItem{path = child_path, rel = child_rel, gi_ctx = gi_ctx})
+			}
+		} else if is_regular {
+			if should_emit && matches_pattern(pool, entry.name) {
+				full_path := join_path(dir_path, entry.name)
+				sync.mutex_lock(&pool.results_mutex)
+				append(pool.results, full_path)
+				sync.mutex_unlock(&pool.results_mutex)
 			}
 		}
 	}
 }
 
-push_work :: proc(pool: ^WalkerPool, path: string) {
+check_chain :: proc(ctx: ^GIContext, entry_rel: string, is_dir: bool) -> bool {
+	c := ctx
+	for c != nil {
+		if c.gi != nil {
+			rel := relative_to(entry_rel, c.base_rel)
+			match := check_match(c.gi, rel, is_dir)
+			if match != .None {
+				return match == .Ignored
+			}
+		}
+		c = c.parent
+	}
+	return false
+}
+
+relative_to :: proc(entry_rel, base_rel: string) -> string {
+	if len(base_rel) == 0 do return entry_rel
+	prefix_len := len(base_rel)
+	if len(entry_rel) > prefix_len && entry_rel[prefix_len] == '/' &&
+	   strings.has_prefix(entry_rel, base_rel) {
+		return entry_rel[prefix_len + 1:]
+	}
+	return entry_rel
+}
+
+build_rel :: proc(buf: []u8, rel, name: string) -> string {
+	if len(rel) == 0 do return name
+	pos := copy(buf, rel)
+	if pos < len(buf) {
+		buf[pos] = '/'
+		pos += 1
+		pos += copy(buf[pos:], name)
+	}
+	return string(buf[:pos])
+}
+
+matches_pattern :: proc(pool: ^WalkerPool, name: string) -> bool {
+	if !pool.has_pattern do return true
+	cap, ok := regex.match(pool.pattern_re, name)
+	regex.destroy(cap)
+	return ok
+}
+
+push_work :: proc(pool: ^WalkerPool, item: WorkItem) {
 	sync.atomic_add_explicit(&pool.active, 1, .Relaxed)
 	sync.mutex_lock(&pool.queue_mutex)
-	append(&pool.queue, path)
+	append(&pool.queue, item)
 	sync.mutex_unlock(&pool.queue_mutex)
 	sync.atomic_sema_post(&pool.queue_sema)
 }
@@ -205,4 +367,3 @@ join_path :: proc(parent, child: string) -> string {
 	result, _ := strings.clone(s)
 	return result
 }
-

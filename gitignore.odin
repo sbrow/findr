@@ -161,17 +161,23 @@ parse :: proc(content: string) -> Gitignore {
 	return gi
 }
 
-is_ignored :: proc(gi: ^Gitignore, path: string, is_dir: bool) -> bool {
-	matched := false
+Match :: enum { None, Ignored, Unignored }
+
+check_match :: proc(gi: ^Gitignore, path: string, is_dir: bool) -> Match {
+	result := Match.None
 	for rule in gi.rules {
 		if rule.dir_only && !is_dir do continue
 		cap, ok := regex.match(rule.regex, path)
 		regex.destroy(cap)
 		if ok {
-			matched = !rule.negated
+			result = rule.negated ? .Unignored : .Ignored
 		}
 	}
-	return matched
+	return result
+}
+
+is_ignored :: proc(gi: ^Gitignore, path: string, is_dir: bool) -> bool {
+	return check_match(gi, path, is_dir) == .Ignored
 }
 
 destroy :: proc(gi: ^Gitignore) {

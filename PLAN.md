@@ -1,98 +1,114 @@
-# findr — Gitignored File Finder
+# findr — Native Odin File Finder (fd Replacement)
 
 ## Overview
 
-findr is a native Odin tool that finds **gitignored files** within git repositories. It replaces envr's current approach of running `fd` twice (all files vs. unignored files) and diffing the results.
-
-**Simplified scope:** findr does one thing — walks directories, finds git repos, reads each repo's `.gitignore`, and prints every gitignored file. No flags, no filtering, no pattern matching. envr handles result filtering itself.
-
-## Current fd Usage in envr (being replaced)
-
-1. **`scan.odin:13-43`** (`scan_path`) — runs `fd` twice per search path:
-   - Run 1: `fd -a <matcher> [-E <exclude>]... -HI <path>` → all files including gitignored
-   - Run 2: `fd -a <matcher> [-E <exclude>]... -H <path>` → hidden but NOT gitignored
-   - Diff = gitignored files only
-2. Both go through `run_fd` (`scan.odin:68-118`), which spawns a subprocess and captures output via temp files.
-
-After findr integration, `scan_path` calls `findr.walk(path)` directly — no subprocess, no double-run, no diff.
+findr is a native Odin file finder that replaces `fd` in envr. It supports three ignore modes for A/B benchmarking against specific fd commands, plus a unique "emit ONLY gitignored files" mode that gives envr a single-pass advantage over fd's double-run-and-diff approach.
 
 ## Directory Structure
 
 ```
 findr/
-  findr.odin           # main + CLI (positional dir args only)
-  walker.odin          # recursive directory walker using core:sys/linux getdents
+  findr.odin           # main + CLI (hand-rolled arg parsing)
+  walker.odin          # parallel directory walker (getdents + thread pool)
   gitignore.odin       # .gitignore parsing + glob→regex transpilation + matching
   test_env.odin        # test harness: temp dir, mock filesystem, assert helpers
-  findr_test.odin      # integration tests (10 tests)
+  findr_test.odin      # integration tests
   gitignore_test.odin  # transpilation + matching unit tests (22 tests)
 ```
-
-## Decisions
-
-- **Scope**: findr prints ALL gitignored files. No regex filtering, no exclude patterns, no type filters. envr post-processes the output.
-- **Gitignore matching**: Transpile gitignore glob patterns to regex, then use `core:text/regex`. No dedicated glob matcher.
-- **Stat avoidance**: Use `core:sys/linux` getdents directly — read `dirent.type` from the kernel, never call stat.
-- **Architecture**: Separate directory with its own `main`. Core logic (`walk` proc + `gitignore` package) designed to be importable into envr later.
 
 ## CLI Interface
 
 ```
-findr [dir1] [dir2] ...
+findr [-I] [--ignored] [--no-hidden] [-E <glob>]... [pattern] [path]...
 ```
 
-No flags. Defaults to `.` if no dirs given. Prints absolute or relative paths (as given) to stdout, one per line.
+Defaults: `include_hidden=true, ignore_mode=.Respected` (matches fd's `-H` behavior).
+
+| fd command | findr equivalent |
+|---|---|
+| `fd -a \.env -E ... -HI ~/` | `findr -I -E ... \.env ~/` |
+| `fd -a \.env -E ... -H ~/`  | `findr -E ... \.env ~/` |
+| `fd . -H ~/`                | `findr ~/` |
+| `fd . -HI ~/`               | `findr -I ~/` |
+| `fd . ~/` (no flags)        | `findr --no-hidden ~/` |
+| *(findr original)*          | `findr --ignored ~/` |
 
 ## Build
 
 ```bash
 odin build findr -o:speed -out:findr/findr
+odin test findr
 ```
 
-## How It Works
+## Architecture
 
+### Two Orthogonal Axes (matching fd's semantics)
+
+1. **Hidden files** (`.` prefix): `include_hidden=true` includes them, `false` excludes them
+2. **Gitignore**: three modes (see `IgnoreMode` below)
+
+### Types
+
+```odin
+IgnoreMode :: enum {
+    Respected,  // skip gitignored, prune ignored dirs (fd -H default)
+    All,        // ignore .gitignore entirely, descend everywhere (fd -HI)
+    Ignored,    // emit ONLY gitignored files, prune ignored dirs (findr original)
+}
+
+WalkOptions :: struct {
+    pattern:        string,       // regex on basename; "" = match all
+    excludes:       []string,     // glob patterns to skip entirely (fd -E)
+    include_hidden: bool,         // true = include dotfiles (fd -H)
+    ignore_mode:    IgnoreMode,
+}
 ```
-walk(dir):
-  entries = getdents(dir)         # via core:sys/linux, zero stat calls
-  if entries contains ".git/":
-    gi = parse(.gitignore)        # if present
-    for entry in entries:
-      if entry is gitignored file:
-        emit entry path
-      if entry is dir (not ignored):
-        walk(entry)               # recurse to find nested repos
-  else:
-    for entry in entries:
-      if entry is dir:
-        walk(entry)               # descend looking for repos
-```
 
-Key behaviors:
-- **Nested repos**: When a repo is found, subdirectories are still traversed to find nested repos. Gitignored directories are pruned (not descended into).
-- **Flat gitignore**: Only the root `.gitignore` is read. `.gitignore` files in subdirectories of a repo are ignored.
-- **Non-repo dirs**: Traversed recursively to find repos. No gitignore rules apply.
+### process_dir Filtering Order Per Entry
 
-## Performance Architecture
+Each directory traversal carries a `WorkItem` with the absolute path, a relative path from repo root, and a `^GIContext` linked list of gitignore contexts (one per ancestor directory with a `.gitignore`).
 
-### Implemented
+1. Skip `.git` directory
+2. **Load nested `.gitignore`**: If this directory has a `.gitignore`, push a new `GIContext` onto the chain (tracked in `pool.all_contexts` for cleanup)
+3. **Per entry**:
+   - Skip non-regular files (symlinks, sockets, etc. — parity with `fd -t f`)
+   - **Excludes**: if entry matches any exclude glob → skip entirely
+   - **Hidden**: if `!include_hidden && name[0] == '.'` → skip entirely
+   - **Gitignore status**: check `GIContext` chain deepest-to-root via `check_chain`, passing the **relative path** (not basename). First match wins (correct gitignore precedence). Nested negation overrides parent rules.
+   - **Mode-based decision**:
 
-- **Stat avoidance via `dirent.type`** — Uses `core:sys/linux` getdents directly, bypassing `core:os` which calls `openat` + `fstat` per entry. File type comes free from the directory entry.
-- **Prune ignored directories** — When a directory matches a gitignore pattern, it is not descended into. Skips potentially thousands of readdir calls.
-- **Parallel traversal** — 8-worker thread pool with shared LIFO queue and futex-based semaphore signaling. 5.4x speedup over serial on home directory.
+| Mode | gitignored file | gitignored dir | normal file | normal dir |
+|---|---|---|---|---|
+| `.All` | emit if pattern matches | descend | emit if pattern matches | descend |
+| `.Respected` | skip | prune | emit if pattern matches | descend |
+| `.Ignored` | emit if pattern matches | prune | skip | descend |
 
-### Future (if needed)
+**Nested repos**: When a directory contains `.git/`, the gitignore context chain is reset (new repo root). The relative path resets to `""`. Nested repos are always traversed to find deeper repos.
 
-- BufWriter on stdout for large result sets
-- Arena allocators for path strings
+### Performance Architecture
+
+- **Stat avoidance via `dirent.type`** — Uses `core:sys/linux` getdents directly, bypassing `core:os` which calls `openat` + `fstat` per entry.
+- **Prune ignored directories** — When a directory matches a gitignore/exclude pattern, it is not descended into.
+- **Parallel traversal** — Worker thread pool with shared LIFO queue and futex-based semaphore signaling. 5.4x speedup over serial on home directory.
+
+## Decisions
+
+- **Gitignore matching**: Transpile gitignore glob patterns to regex, then use `core:text/regex`. No dedicated glob matcher.
+- **Pattern matching**: Pattern is a regex (same as fd), matched against basename via `regex.match` (unanchored search).
+- **Excludes**: Glob patterns compiled via the same gitignore transpiler (`parse()`). Reuses tested transpilation logic.
+- **Nested gitignore**: Every `.gitignore` file within a repo is read, not just the root. Each directory's rules are scoped relative to that directory's path. Negation in a child overrides parent rules (correct gitignore precedence).
+- **Stat avoidance**: Use `core:sys/linux` getdents directly — read `dirent.type` from the kernel, never call stat. `DT_UNKNOWN` treated as regular file (correct for ext4/tmpfs; may miss dirs on XFS/BTRFS/FUSE — Phase 7 concern).
 
 ## Testing Strategy
 
 - **In-process integration tests** — Tests call `walk()` directly (not via subprocess), build mock filesystems in temp dirs, and compare sorted output.
 - **Unit tests** — Pure-function tests for glob→regex transpilation and gitignore matching.
 - **Output sorting for determinism** — Always sort output lines before comparison.
-- **Memory tracking** — Odin's test runner reports leaks automatically. All 32 tests pass with zero leaks.
+- **Memory tracking** — Odin's test runner reports leaks automatically.
 
 ### Test Coverage (findr_test.odin)
+
+**`.Ignored` mode (original findr behavior):**
 
 | Test | What it covers |
 |---|---|
@@ -102,14 +118,35 @@ Key behaviors:
 | `test_dir_only_pattern` | `node_modules/` pattern doesn't emit file results |
 | `test_multiple_repos` | Multiple repos in one tree, each with its own `.gitignore` |
 | `test_nested_repos` | Repo inside a repo, both scanned independently |
-| `test_gitignore_in_subdir_ignored` | Subdirectory `.gitignore` files are not read |
 | `test_no_gitignore_file` | Repo with `.git/` but no `.gitignore` produces nothing |
 | `test_empty_gitignore` | Comments and blank lines only → no results |
 | `test_multiple_search_dirs` | Multiple top-level search dirs in one call |
+| `test_nested_gitignore_read` | Nested `.gitignore` rules applied (subdir patterns work) |
+| `test_nested_gitignore_negation` | Nested negation overrides parent pattern |
+| `test_multisegment_pattern` | `build/output.txt` matches relative path, not just basename |
 
-### Gitignore Unit Tests (gitignore_test.odin)
+**`.All` mode (fd -HI parity):**
 
-22 tests covering: simple/anchored patterns, `*`, `?`, `[abc]`, `[!abc]`, dot escaping, globstar variants, backslash escapes, empty patterns, basic matching, negation, dir-only, comments, blank lines, last-match-wins, env patterns.
+| Test | What it covers |
+|---|---|
+| `test_all_mode_emits_all_files` | All files emitted regardless of gitignore |
+| `test_all_mode_descends_everywhere` | Gitignored dirs still descended |
+
+**`.Respected` mode (fd -H parity):**
+
+| Test | What it covers |
+|---|---|
+| `test_respected_mode_skips_gitignored` | Gitignored files skipped |
+| `test_respected_mode_prunes_ignored_dirs` | Gitignored dirs pruned |
+| `test_nested_gitignore_respected_mode` | Nested negation respected in `.Respected` mode |
+
+**Filters:**
+
+| Test | What it covers |
+|---|---|
+| `test_excludes_prune_dirs` | Excluded dirs not descended |
+| `test_pattern_filters_results` | Only pattern-matching files emitted |
+| `test_no_hidden_skips_dotfiles` | Hidden files skipped when include_hidden=false |
 
 ## Glob→Regex Transpilation Rules
 
@@ -130,108 +167,152 @@ Key behaviors:
 
 ### Phase 1: Gitignore Transpiler + Tests ✅
 
-**Goal:** Isolated, fully-tested glob→regex transpiler.
-
-**Result:** 22 tests, all passing, zero leaks.
-
----
+22 tests, all passing, zero leaks.
 
 ### Phase 2: findr Walker + Tests ✅
 
-**Goal:** Working tool that finds gitignored files in git repos.
-
-**Built:**
-- `walker.odin` — Parallel DFS using `core:sys/linux` getdents with 8-worker thread pool. Finds repos, reads `.gitignore`, emits gitignored files, recurses into subdirs for nested repos.
-- `findr.odin` — Minimal CLI: `findr [dirs...]`, no flags.
-- `test_env.odin` — Test harness with temp dirs and mock filesystems.
-- `findr_test.odin` — 10 integration tests.
-
-**Result:** All 32 tests pass (22 gitignore + 10 walker), zero leaks.
-
----
+Parallel DFS using getdents with worker thread pool. 32 total tests pass, zero leaks.
 
 ### Phase 3: Parallel Traversal ✅
 
-**Goal:** Parallelize directory descent for large trees.
-
-**Result:** Worker pool with shared LIFO queue, 8 threads, futex-based semaphore signaling. 852ms vs 4.57s serial (5.4x speedup) on `~`. Serial code has been removed — parallel is the only implementation.
-
----
+8-worker thread pool, shared LIFO queue, futex-based semaphore. 852ms vs 4.57s serial (5.4x speedup). Serial code removed — parallel is the only implementation.
 
 ### Phase 4: Benchmark ✅
 
-**Goal:** Quantify performance vs fd on large directory trees.
+findr found 227 gitignored files on `~` in 852ms. fd's double-run walked ~1.1M entries.
 
-**Result:** findr found 227 gitignored files on `~` in 852ms. fd's double-run (all vs unignored) walked ~1.1M entries. findr's pruning of ignored directories (node_modules, dist, etc.) gives a massive advantage.
+### Phase 5: fd-Parity API ✅
 
----
+**Goal:** Make findr replicate specific fd commands for A/B benchmarking, plus keep the unique gitignored-only mode.
 
-### Phase 5: Integrate into envr (future)
+**Built:**
+- `IgnoreMode` enum (`.Respected`, `.All`, `.Ignored`) and `WalkOptions` struct
+- New `walk` signature: `walk(root, results, opts: WalkOptions, thread_count)`
+- Rewritten `process_dir` with centralized mode-based filtering
+- Pattern matching via `core:text/regex` on basenames
+- Exclude patterns compiled via existing `gitignore.parse()`
+- CLI arg parsing: `-I`, `--ignored`, `--no-hidden`, `-E <glob>`
+- 7 new integration tests (17 total) covering all three modes, excludes, pattern, and hidden filtering
 
-**Goal:** Replace ALL `fd` subprocess usage in envr with in-process findr calls. Remove `Feature.Fd` entirely.
+**Result:** All tests pass (22 gitignore + 20 walker = 42), zero leaks.
 
-#### Part A: Extend findr API (`findr/walker.odin`)
+### Phase 6: Parity (partially done)
 
-1. **Add `WalkMode` enum** and `mode` field to `WalkerPool`:
+**Goal:** Achieve file-count parity with fd. An invalid benchmark (different result sets) is useless.
+
+#### Steps 1-2: Nested gitignore + relative path matching ✅
+
+**What was done:**
+
+1. **`Match` enum + `check_match`** in `gitignore.odin` — Tri-state return (`None`/`Ignored`/`Unignored`) so nested negation overrides work correctly. `is_ignored` wraps it as before.
+
+2. **`GIContext` linked list** in `walker.odin` — Each context holds a `^Gitignore`, `base_rel` (relative path from repo root to this dir), and `parent: ^GIContext`. `process_dir` loads `.gitignore` in every directory within a repo (not just roots). `check_chain` walks deepest-to-root, first match wins (correct gitignore precedence).
+
+3. **`WorkItem` struct** replaced plain `string` in the work queue:
    ```odin
-   WalkMode :: enum { GitignoredFiles, GitRepos }
-   ```
-
-2. **Extract `run_pool`** helper — shared pool setup/teardown (create threads, wait for done, cleanup). Both `walk` and `find_repos` call it.
-
-3. **New `walk` signature with filtering:**
-   ```odin
-   walk :: proc(root: string, results: ^[dynamic]string, matcher: string = "", exclude: []string = nil)
-   ```
-   - Compiles `matcher` into a regex (stored as `pool.matcher_re`); tested against each file's basename via `regex.find`. Empty = emit all.
-   - Parses `exclude` patterns into a `^Gitignore` via existing `parse()` (stored as `pool.exclude_gi`). Entries matching any exclude pattern are skipped entirely (not emitted, not descended into).
-   - Sets `pool.mode = .GitignoredFiles`
-
-4. **`process_dir` filtering logic** (in the `has_git` branch):
-   - Exclude check first: `is_ignored(exclude_gi, entry.name, is_dir)` → skip entirely (prune dirs, skip files)
-   - Gitignore check: if ignored, emit file only if `matcher_re` is nil or matches basename
-   - Not excluded/ignored: descend if dir
-   - Non-repo branch also prunes dirs matching exclude patterns
-
-5. **New `find_repos` function:**
-   ```odin
-   find_repos :: proc(root: string) -> [dynamic]string
-   ```
-   - Creates pool with `mode = .GitRepos`, calls `run_pool`, returns collected repo roots
-   - Parallel (reuses worker pool architecture)
-
-6. **New `process_dir_repos`** — simpler than `process_dir`:
-   - If `has_git`: record `dir_path` as repo root
-   - Always descend into subdirs (except `.git` itself) to find nested repos
-   - No gitignore/exclude/matcher processing
-
-7. **`walk_worker` switch** — centralized control flow per AGENTS.md convention:
-   ```odin
-   switch pool.mode {
-   case .GitignoredFiles: process_dir(pool, dir_path)
-   case .GitRepos:        process_dir_repos(pool, dir_path)
+   WorkItem :: struct {
+       path:    string,       // absolute directory path
+       rel:     string,       // relative path from repo root ("" = root)
+       gi_ctx:  ^GIContext,   // gitignore chain (nil = outside any repo)
    }
    ```
 
-8. **Cleanup in `walk`:** destroy `matcher_re` and `exclude_gi` after `run_pool` completes.
+4. **Relative path matching** — `check_chain` strips each context's `base_rel` prefix to get the locally-scoped relative path. Multi-segment patterns like `build/output.txt` now match correctly.
 
-9. **Add `import "core:text/regex"`** to walker.odin.
+5. **Symlink filtering** — Only `DT_REG` and `DT_UNKNOWN` entries are emitted (matching `fd -t f`). Symlinks (`DT_LNK`) are skipped.
 
-**No changes to:** `findr.odin`, `test_env.odin`, `gitignore.odin` (default params preserve existing behavior).
+6. **`DT_UNKNOWN` handling** — Treated as regular files (no stat fallback). Correct for ext4/tmpfs; may miss directories on XFS/BTRFS/FUSE.
 
-#### Part B: Rewrite `scan_path` (`scan.odin`)
+**Memory management:** All `GIContext` objects tracked in `pool.all_contexts` (mutex-protected append). Gitignore objects and context structs freed in bulk when `walk` completes.
 
-- Add `import "findr"`
-- `scan_path` becomes ~3 lines: call `findr.walk(search_path, &paths, cfg.ScanConfig.Matcher, cfg.ScanConfig.Exclude[:])`
-- **Delete:** `build_fd_args`, `run_fd`, `next_fd_tmp_path`, `fd_counter`, `fd_seq`, `cant_scan`
-- Remove unused imports (`core:sync`, `core:terminal`)
+**Parity achieved** (`~`, 5M+ files):
 
-#### Part C: Rewrite `find_git_roots` (`config.odin`)
+| Mode | findr | fd equivalent | diff |
+|---|---|---|---|
+| `.All` (-I) | 5,426,451 | `fd -HI -t f --exclude .git` | **0 (exact)** |
+| `.Respected` | 4,442,505 | `fd -H -t f --exclude .git` | +1,417 (0.03%) |
+| `--no-hidden` | 393,605 | `fd -t f --exclude .git` | +17 (0.004%) |
 
-- Add `import "findr"`
-- Replace `run_fd` call with `findr.find_repos(sp)` — no more `filepath.dir` post-processing needed (find_repos returns repo roots directly)
+On the envr repo itself, all three modes are **exact match (0 diffs)**. The tiny residual diffs on `~` are likely from global gitignore (`~/.config/git/ignore`) and `.git/info/exclude` which fd reads but findr doesn't.
 
-#### Part D: Remove `Feature.Fd` everywhere
+#### Step 3: DT_UNKNOWN stat fallback (TODO)
+
+On XFS/BTRFS/FUSE filesystems, `dirent.type` returns `DT_UNKNOWN`. Currently findr treats these as regular files, which means directories may be missed (not descended into). Add a stat fallback in `read_dir_entries` when `d.type == .UNKNOWN` to determine the real type before proceeding. This is not needed for ext4/tmpfs (what tests and most Linux systems use).
+
+### Phase 7: Performance Optimization (next)
+
+**Goal:** Make findr competitive with or faster than fd across all modes. Current benchmark (`~`, hyperfine 5 runs):
+
+| Command | Mean | vs fd equivalent |
+|---|---|---|
+| `findr --ignored` | 984ms | *(no fd equivalent)* |
+| `findr --no-hidden` | 542ms | 3.2x slower than `fd -t f` (170ms) |
+| `findr` (respected) | 4.134s | 2.4x slower than `fd -H -t f` (1.745s) |
+| `findr -I` (all) | 3.821s | 1.9x slower than `fd -HI -t f` (1.972s) |
+
+**Bottleneck analysis:**
+
+1. **Mutex contention on result collection** — Every file append goes through `sync.mutex_lock(&pool.results_mutex)` → `append` → `sync.mutex_unlock`. With 5M+ files across 16 threads, workers serialize on the mutex.
+
+2. **`--ignored` regression** — Was 402ms before nested gitignore support, now 984ms. The overhead comes from loading `.gitignore` in every directory and checking the context chain per entry. Since `--ignored` mode prunes gitignored dirs, many of these `.gitignore` loads are wasted (the dir won't be descended into anyway). Optimization: skip loading `.gitignore` for directories that will be pruned.
+
+3. **Per-string heap allocation** — Every path string is individually `strings.clone`'d and `delete`'d. Millions of alloc/free calls.
+
+**Optimization plan:**
+
+1. **Per-thread result buffers** — Each worker accumulates results in a thread-local `[dynamic]string`. Merge into shared array once at the end (single-threaded concat).
+
+2. **Lazy gitignore loading for `.Ignored` mode** — Only load `.gitignore` when we need to decide whether to emit or descend. In `.Ignored` mode, we can check the parent context first and skip loading if the directory itself is already ignored.
+
+3. **Arena allocator for paths** — Replace per-string `strings.clone` with a bump allocator. Free everything in one `arena_destroy` at the end.
+
+4. **Larger getdents buffer** — Increase from 8KB to 64KB to reduce syscall count.
+
+5. **BufWriter on stdout** — Batch `write` syscalls instead of per-line `fmt.println`.
+
+**Success criteria:**
+- `.All` mode faster than `fd -HI -t f --exclude .git`
+- `.Respected` mode faster than `fd -H -t f --exclude .git`
+- `--ignored` mode faster than `fd -HI -t f --exclude .git` (restore pre-regression advantage)
+- Re-benchmark after each step using `findr/bench.sh`
+
+### Phase 8: Integrate into envr
+
+**Goal:** Replace ALL `fd` subprocess usage in envr with in-process findr calls. Remove `Feature.Fd` entirely.
+
+#### Part A: Rewrite `scan_path` (`scan.odin`)
+
+Replace the double-run-and-diff approach with a single `findr.walk` call using `.Ignored` mode:
+
+```odin
+// Before: fd -HI + fd -H, then diff
+// After:
+findr.walk(search_path, &paths, WalkOptions{
+    pattern = cfg.ScanConfig.Matcher,
+    excludes = cfg.ScanConfig.Exclude[:],
+    include_hidden = true,
+    ignore_mode = .Ignored,
+}, thread_count)
+```
+
+**Delete:** `build_fd_args`, `run_fd`, `next_fd_tmp_path`, `fd_counter`, `fd_seq`, `cant_scan`.
+
+#### Part B: Add `find_repos` and rewrite `find_git_roots` (`config.odin`)
+
+Add a `find_repos` proc to findr that walks a tree and collects directories containing `.git/`:
+
+```odin
+find_repos :: proc(root: string, results: ^[dynamic]string, thread_count: int)
+```
+
+- Reuses worker pool architecture
+- `process_dir` emits `dir_path` when `has_git == true`
+- Always descends into subdirs (except `.git`) to find nested repos
+- No gitignore/exclude/pattern processing
+
+Replace `find_git_roots`'s `run_fd` call with `findr.find_repos`.
+
+#### Part C: Remove `Feature.Fd` everywhere
 
 | File | Change |
 |---|---|
@@ -240,9 +321,9 @@ Key behaviors:
 | `cmd_check.odin` | Same removal |
 | `cmd_deps.odin` | Remove fd table row |
 | `db.odin` | Change check to `.Git not_in feats` only; update error message |
-| `scan_test.odin` | Remove `test_scan_meets_expectations` (cant_scan test); remove `cant_scan` assertions from other tests |
+| `scan_test.odin` | Remove `cant_scan` tests and assertions |
 
-#### Part E: Verification
+#### Part D: Verification
 
 ```bash
 odin build findr -o:speed -out:findr/findr
@@ -251,20 +332,11 @@ odin build . -o:speed -out:envr
 odin test .
 ```
 
-#### Execution order
-
-1. **findr API changes** → build + test findr (32 tests should pass with default params)
-2. **Rewrite scan_path** + delete dead code
-3. **Rewrite find_git_roots**
-4. **Remove Feature.Fd** across all files
-5. **Update tests** → build + test everything
-
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| Single-threaded may be slow on huge trees | Resolved — parallel traversal implemented (Phase 3) |
 | Gitignore edge cases (`**/foo`, `foo/**/bar`) | Comprehensive gitignore_test.odin with spec examples |
-| dirent.type may be UNKNOWN on some filesystems | Fall back to stat only when type is UNKNOWN |
-| Missing nested `.env` files in monorepos | Accepted limitation — flat gitignore model |
-| Memory allocation churn from path strings | Use thread-local arena allocators in Phase 3 |
+| `DT_UNKNOWN` on XFS/BTRFS/FUSE | Phase 6 Step 3: stat fallback for unknown types |
+| Global gitignore (`~/.config/git/ignore`) and `.git/info/exclude` not read | Causes ~0.03% delta vs fd. Acceptable for envr's use case (finds `.env` files in repos). |
+| Thread safety of `regex.match` on shared `Regular_Expression` | Odin regex is read-only after compilation; `match` returns per-call `Captures` |
