@@ -41,11 +41,11 @@ echo "=== File counts ==="
 printf "  fd -a .                      : %8d\n" "$(fd -a . "$TARGET" 2>/dev/null | wc -l)"
 printf "  findr                        : %8d\n" "$("$FINDR" "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd -a -H .                   : %8d\n" "$(fd -a -H . "$TARGET" 2>/dev/null | wc -l)"
-printf "  findr -H                     : %8d\n" "$("$FINDR" -H "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .git -H .           : %8d\n" "$(fd -a -E .git -H . "$TARGET" 2>/dev/null | wc -l)"
+printf "  findr -E .git -H             : %8d\n" "$("$FINDR" -E .git -H "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd -a -HI .                  : %8d\n" "$(fd -a -HI . "$TARGET" 2>/dev/null | wc -l)"
-printf "  findr -HI                    : %8d\n" "$("$FINDR" -HI "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .git -HI .          : %8d\n" "$(fd -a -E .git -HI . "$TARGET" 2>/dev/null | wc -l)"
+printf "  findr -E .git -HI            : %8d\n" "$("$FINDR" -E .git -HI "$TARGET" 2>/dev/null | wc -l)"
 echo
 printf "  fd -a -E .git .              : %8d\n" "$(fd -a -E .git . "$TARGET" 2>/dev/null | wc -l)"
 printf "  findr -E .git                : %8d\n" "$("$FINDR" -E .git "$TARGET" 2>/dev/null | wc -l)"
@@ -60,10 +60,10 @@ hyperfine \
     --export-markdown "$RESULTS_FILE" \
     "fd -a . \"$TARGET\" > /dev/null" \
     "$FINDR \"$TARGET\" > /dev/null" \
-    "fd -a -H . \"$TARGET\" > /dev/null" \
-    "$FINDR -H \"$TARGET\" > /dev/null" \
-    "fd -a -HI . \"$TARGET\" > /dev/null" \
-    "$FINDR -HI \"$TARGET\" > /dev/null" \
+    "fd -a -E .git -H . \"$TARGET\" > /dev/null" \
+    "$FINDR -E .git -H \"$TARGET\" > /dev/null" \
+    "fd -a -E .git -HI . \"$TARGET\" > /dev/null" \
+    "$FINDR -E .git -HI \"$TARGET\" > /dev/null" \
     "fd -a -E .git . \"$TARGET\" > /dev/null" \
     "$FINDR -E .git \"$TARGET\" > /dev/null"
 echo

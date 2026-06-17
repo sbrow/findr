@@ -205,7 +205,7 @@ process_dir :: proc(pool: ^WalkerPool, item: WorkItem) {
 		if entry.name == ".git" do continue
 
 		is_dir := entry.type == .DIR
-		is_regular := entry.type == .REG || entry.type == .UNKNOWN
+		is_regular := entry.type == .REG || entry.type == .UNKNOWN || entry.type == .LNK
 
 		if pool.exclude_gi != nil && is_ignored(pool.exclude_gi, entry.name, is_dir) {
 			continue
