@@ -1,10 +1,8 @@
 # TODOS
 
-- [ ] add `flake.nix`
-
 ## `collect_worker` improvements
 
-- [ ] `bytes.index_byte`, `#no_bounds_check`
+- [x] `bytes.index_byte`, `#no_bounds_check`
 
 ```odin
 collect_worker :: proc(t: ^thread.Thread) {
