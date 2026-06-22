@@ -1,7 +1,5 @@
 # TODOS
 
-- [ ] add `flake.nix`
-
 ## `collect_worker` improvements
 
 - [ ] `bytes.index_byte`, `#no_bounds_check`
