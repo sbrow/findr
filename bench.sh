@@ -38,16 +38,16 @@ echo
 
 # --- file counts ---
 echo "=== File counts ==="
-printf "  fd -a -E .jj .                : %8d\n" "$(fd -a -E .jj . "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .jj .                : %8d\n" "$(fd --strip-cwd-prefix=never -a -E .jj . "$TARGET" 2>/dev/null | wc -l)"
 printf "  findr -E .jj                  : %8d\n" "$("$FINDR" -E .jj "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd -a -E .git -E .jj -H .     : %8d\n" "$(fd -a -E .git -E .jj -H . "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .git -E .jj -H .     : %8d\n" "$(fd --strip-cwd-prefix=never -a -E .git -E .jj -H . "$TARGET" 2>/dev/null | wc -l)"
 printf "  findr -E .git -E .jj -H       : %8d\n" "$("$FINDR" -E .git -E .jj -H "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd -a -E .git -E .jj -HI .    : %8d\n" "$(fd -a -E .git -E .jj -HI . "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .git -E .jj -HI .    : %8d\n" "$(fd --strip-cwd-prefix=never -a -E .git -E .jj -HI . "$TARGET" 2>/dev/null | wc -l)"
 printf "  findr -E .git -E .jj -HI      : %8d\n" "$("$FINDR" -E .git -E .jj -HI "$TARGET" 2>/dev/null | wc -l)"
 echo
-printf "  fd -a -E .git -E .jj .        : %8d\n" "$(fd -a -E .git -E .jj . "$TARGET" 2>/dev/null | wc -l)"
+printf "  fd -a -E .git -E .jj .        : %8d\n" "$(fd --strip-cwd-prefix=never -a -E .git -E .jj . "$TARGET" 2>/dev/null | wc -l)"
 printf "  findr -E .git -E .jj          : %8d\n" "$("$FINDR" -E .git -E .jj "$TARGET" 2>/dev/null | wc -l)"
 echo
 
